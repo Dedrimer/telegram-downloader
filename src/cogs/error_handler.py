@@ -48,7 +48,23 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             chat_id=env.USER_ID, text=message, parse_mode="HTML"
         )
 
-    # Send error message in chat
-    await update.message.reply_text(
-        "An error occurred while processing the request. Please check the logs."
-    )
+
+ # 判断 update 是否具备发送消息的能力
+    if update:
+        # effective_message 会自动优先寻找消息、edited_channel_post、callback_query.message 等中的 message
+        target = update.effective_message
+        
+        # 如果实在没有任何有效消息体，但存在 chat id（极少见情况：残留的消息），直接用 bot 发
+        if not target and update.effective_chat:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="An error occurred while processing the request. Please check the logs."
+            )
+        elif target:
+            await target.reply_text(
+                "An error occurred while processing the request. Please check the logs."
+            )
+        else:
+            logger.warning("无法找到任何有效的 message/chat 向用户回复错误。")
+    else:
+        logger.warning("Update 本体为 None，无法向用户回复错误信息。")
