@@ -1,9 +1,11 @@
 import asyncio
+import asyncio
 import logging
 import os
+from typing import Optional
 
 from telegram import Bot, File
-from telegram.error import NetworkError
+from telegram.error import NetworkError, TimedOut, TelegramError
 
 from src.utils.env import env
 
@@ -14,6 +16,7 @@ logger = logging.getLogger(__name__)
 # Retry constants
 MAX_RETRIES = 5
 INITIAL_RETRY_DELAY = 5
+MAX_RETRY_DELAY = 60  # 最大重试延迟时间（秒）
 
 # Environment variables
 DOWNLOAD_TO_DIR = env.DOWNLOAD_TO_DIR
@@ -21,7 +24,7 @@ DOWNLOAD_TO_DIR = env.DOWNLOAD_TO_DIR
 
 async def get_file(bot: Bot, file: DownloadFile) -> File:
     """
-    Download a file from Telegram with retry logic.
+    Download a file from Telegram with enhanced retry logic.
     Args:
         bot (Bot): The bot instance used to download the file.
         file (DownloadFile): The download file object (containing file_id).
@@ -31,26 +34,56 @@ async def get_file(bot: Bot, file: DownloadFile) -> File:
         Exception: If the maximum number of retries is reached/non network error occurs
         or file already exists.
     """
-    for i in range(MAX_RETRIES):
+    last_exception = None
+    
+    for attempt in range(MAX_RETRIES):
         # Log attempt
-        logger.info(f"Downloading file, attempt {i + 1}")
-        file.download_retries = i
+        logger.info(f"Downloading file '{file.file_name}', attempt {attempt + 1}/{MAX_RETRIES}")
+        file.download_retries = attempt
 
         # Check if file exists in directory already
         check_file_exists(file.file_id, file.file_name, check_downloading_files=False)
 
         try:
             new_file = await bot.get_file(file.file_id, read_timeout=1800)
-            logger.info("File downloaded successfully")
-            break
+            logger.info(f"File '{file.file_name}' downloaded successfully on attempt {attempt + 1}")
+            return new_file
         except NetworkError as e:
-            logger.error(f"Server disconnect error: {e}")
-            await asyncio.sleep(INITIAL_RETRY_DELAY * i)
-
-    else:
-        raise Exception("Max retries reached")
-
-    return new_file
+            last_exception = e
+            logger.error(f"Network error on attempt {attempt + 1}: {e}")
+            file.last_error = f"Network error: {str(e)}"
+            file.retry_history.append(f"Attempt {attempt + 1}: Network error - {str(e)}")
+        except TimedOut as e:
+            last_exception = e
+            logger.error(f"Timeout error on attempt {attempt + 1}: {e}")
+            file.last_error = f"Timeout error: {str(e)}"
+            file.retry_history.append(f"Attempt {attempt + 1}: Timeout error - {str(e)}")
+        except TelegramError as e:
+            last_exception = e
+            logger.error(f"Telegram error on attempt {attempt + 1}: {e}")
+            file.last_error = f"Telegram error: {str(e)}"
+            file.retry_history.append(f"Attempt {attempt + 1}: Telegram error - {str(e)}")
+            # 对于某些Telegram错误，可能不需要重试
+            if "file is too big" in str(e).lower():
+                logger.error("File too big, not retrying")
+                raise
+        except Exception as e:
+            last_exception = e
+            logger.error(f"Unexpected error on attempt {attempt + 1}: {e}")
+            file.last_error = f"Unexpected error: {str(e)}"
+            file.retry_history.append(f"Attempt {attempt + 1}: Unexpected error - {str(e)}")
+            # 对于非网络相关错误，可能不需要重试
+            raise
+        
+        # 如果不是最后一次尝试，等待后重试
+        if attempt < MAX_RETRIES - 1:
+            # 使用指数退避策略，但设置最大延迟
+            delay = min(INITIAL_RETRY_DELAY * (2 ** attempt), MAX_RETRY_DELAY)
+            logger.info(f"Waiting {delay} seconds before retry...")
+            await asyncio.sleep(delay)
+    
+    # 如果所有重试都失败，抛出最后一个异常
+    raise Exception(f"Max retries ({MAX_RETRIES}) reached for file '{file.file_name}'. Last error: {last_exception}")
 
 
 def check_file_exists(

@@ -45,6 +45,9 @@ TOKEN_SUB_DIR = BOT_TOKEN.replace(":", ":", 1) if os.name == "nt" else BOT_TOKEN
 # 存储媒体组的确认消息
 _media_group_confirmations = {}
 
+# 存储媒体组失败文件信息，用于重试
+_media_group_failed_files = {}
+
 # 🌟 定义用于 Markdown V1 的转义函数（这可以绕过 V2 的各种麻烦限制）
 def escape_md(text: str) -> str:
     if not isinstance(text, str):
@@ -244,9 +247,30 @@ async def _download_single_file(
         downloading_files.pop(file_id, None)
         error_text = escape_md(str(e))
         safe_file_name = escape_md(file_name)
+        
+        # 提供重试按钮，使用简单的文本格式避免Markdown解析问题
+        retry_message = (
+            f"⛔ Error downloading file\n"
+            f"File: {safe_file_name}\n"
+            f"Error: {error_text}\n\n"
+            f"🔄 Retry information:\n"
+            f"Attempts: {download_file.download_retries + 1}\n"
+            f"Last error: {escape_md(download_file.last_error or 'Unknown')}"
+        )
+        
+        # 使用文件ID的最后8位作为回调数据，避免超过Telegram限制
+        short_file_id = file_id[-8:] if len(file_id) > 8 else file_id
+        
         await message.reply_text(
-            f"⛔ Error downloading file\n`{safe_file_name}`\n```\n{error_text}```",
-            parse_mode="Markdown",
+            retry_message,
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("🔄 Retry", callback_data=f"retry_{short_file_id}"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="cancel_retry"),
+                    ]
+                ]
+            ),
         )
         return False
     
@@ -349,6 +373,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         success_count = 0
         fail_count = 0
+        failed_files = []
         
         for (file_id, file_name, file_size), message in files_info:
             success = await _download_single_file(
@@ -358,6 +383,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 success_count += 1
             else:
                 fail_count += 1
+                failed_files.append((file_id, file_name, file_size, message))
             # 给每个文件下载之间一点间隔
             await asyncio.sleep(0.5)
         
@@ -368,7 +394,32 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"> ❌ Failed: `{fail_count}`\n"
             f"> 📁 Total: `{len(files_info)}`"
         )
-        await query.message.reply_text(summary_message, parse_mode="Markdown")
+        
+        # 如果有失败的文件，添加重试按钮
+        if failed_files:
+            summary_message += "\n\n🔄 *Failed files can be retried individually*"
+            await query.message.reply_text(
+                summary_message, 
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton("🔄 Retry All Failed", callback_data=f"retry_media_group_{media_group_id}"),
+                            InlineKeyboardButton("❌ Cancel", callback_data="cancel_retry"),
+                        ]
+                    ]
+                ),
+            )
+        else:
+            await query.message.reply_text(summary_message, parse_mode="Markdown")
+        
+        # 存储失败文件信息用于重试
+        if failed_files:
+            _media_group_failed_files[media_group_id] = {
+                'failed_files': failed_files,
+                'context': group_context
+            }
+        
         return
     
     # 处理单个文件确认
@@ -393,6 +444,55 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if query.data == "yes":
         logger.info(f"Confirmed to download file -> {file_name}")
         await _download_single_file(file_id, file_name, file_size, message, context)
+    elif query.data.startswith("retry_"):
+        # 处理重试逻辑
+        short_file_id = query.data.split("_", 1)[1]
+        # 检查简化的文件ID是否匹配
+        expected_short_id = file_id[-8:] if len(file_id) > 8 else file_id
+        if short_file_id == expected_short_id:
+            logger.info(f"Retrying download for file -> {file_name}")
+            await _download_single_file(file_id, file_name, file_size, message, context)
+        else:
+            logger.warning(f"Retry file ID mismatch: expected {expected_short_id}, got {short_file_id}")
+            await query.message.reply_text("Retry failed: file ID mismatch.")
+    elif query.data == "cancel_retry":
+        logger.info("Retry cancelled by user")
+        await query.message.reply_text("Retry cancelled.")
+    elif query.data.startswith("retry_media_group_"):
+        # 处理媒体组重试逻辑
+        media_group_id = query.data.split("_", 3)[3]
+        if media_group_id in _media_group_failed_files:
+            failed_info = _media_group_failed_files.pop(media_group_id)
+            failed_files = failed_info['failed_files']
+            retry_context = failed_info['context']
+            
+            logger.info(f"Retrying {len(failed_files)} failed files from media group {media_group_id}")
+            
+            success_count = 0
+            fail_count = 0
+            
+            for file_id, file_name, file_size, message in failed_files:
+                success = await _download_single_file(
+                    file_id, file_name, file_size, message, retry_context
+                )
+                if success:
+                    success_count += 1
+                else:
+                    fail_count += 1
+                # 给每个文件下载之间一点间隔
+                await asyncio.sleep(0.5)
+            
+            # 发送重试总结消息
+            retry_summary = (
+                f"🔄 *Retry completed*\n\n"
+                f"> ✅ Successful: `{success_count}`\n"
+                f"> ❌ Failed: `{fail_count}`\n"
+                f"> 📁 Total retried: `{len(failed_files)}`"
+            )
+            await query.message.reply_text(retry_summary, parse_mode="Markdown")
+        else:
+            logger.warning(f"Media group {media_group_id} not found for retry")
+            await query.message.reply_text("Retry failed: media group not found.")
     else:
         logger.info("Download cancelled")
         await message.reply_text("Download cancelled.")

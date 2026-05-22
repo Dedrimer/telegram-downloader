@@ -1,5 +1,7 @@
-from dataclasses import InitVar, dataclass
+from dataclasses import InitVar, dataclass, field
+from dataclasses import InitVar, dataclass, field
 from datetime import datetime, timedelta
+from typing import List, Optional
 
 
 @dataclass
@@ -8,6 +10,10 @@ class DownloadFile:
     file_name: str
     file_size: int
     download_retries: int = 0
+    max_retries: int = 3
+    retry_delay: float = 2.0
+    last_error: Optional[str] = None
+    retry_history: List[str] = field(default_factory=list)
     _start_datetime: InitVar[datetime] = None
     _finish_download_datetime: datetime = None
     _finish_move_datetime: datetime = None
