@@ -1,7 +1,5 @@
 # Telegram Downloader 📁
 
-[中文版](README_CN.md)
-
 A Telegram bot for downloading video files sent or forwarded to the bot, with support for batch downloading of media groups.
 
 ### ✨ Features
