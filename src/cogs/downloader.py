@@ -1,5 +1,4 @@
 import asyncio
-import asyncio
 import logging
 import math
 import os
@@ -47,6 +46,9 @@ _media_group_confirmations = {}
 
 # 存储媒体组失败文件信息，用于重试
 _media_group_failed_files = {}
+
+# 存储媒体组文件选择状态
+_media_group_file_selections = {}
 
 # 🌟 定义用于 Markdown V1 的转义函数（这可以绕过 V2 的各种麻烦限制）
 def escape_md(text: str) -> str:
@@ -147,6 +149,9 @@ async def _handle_media_group_download(
                 [
                     InlineKeyboardButton("Yes", callback_data=f"media_group_yes_{media_group_id}"),
                     InlineKeyboardButton("No", callback_data=f"media_group_no_{media_group_id}"),
+                ],
+                [
+                    InlineKeyboardButton("📱 Select Files", callback_data=f"mg_select_{media_group_id}"),
                 ]
             ]
         ),
@@ -342,6 +347,119 @@ async def _download_single_file(
     await message.reply_text(response_message, parse_mode="Markdown")
     return True
 
+async def _show_file_selection(
+    query,
+    media_group_id: str,
+    page: int = 0
+):
+    """
+    显示文件选择界面
+    支持分页：每页最多 8 个文件按钮（避免 Telegram 消息按钮过多）
+    """
+    if media_group_id not in _media_group_confirmations:
+        await query.edit_message_text("⚠️ Media group session expired.")
+        return
+    
+    media_group_info = _media_group_confirmations[media_group_id]
+    files_info = media_group_info['files_info']
+    
+    # 初始化选择状态（默认全部选中）
+    if media_group_id not in _media_group_file_selections:
+        _media_group_file_selections[media_group_id] = [True] * len(files_info)
+    
+    selections = _media_group_file_selections[media_group_id]
+    
+    # 分页逻辑
+    files_per_page = 8
+    total_pages = math.ceil(len(files_info) / files_per_page)
+    page = max(0, min(page, total_pages - 1))
+    
+    start_idx = page * files_per_page
+    end_idx = min(start_idx + files_per_page, len(files_info))
+    
+    # 构建文件列表文本
+    file_lines = []
+    for i, ((file_id, file_name, file_size), msg) in enumerate(files_info):
+        status = "✅" if selections[i] else "❌"
+        size_mb = file_size / 1024 / 1024
+        safe_name = escape_md(file_name[:25] + "..." if len(file_name) > 25 else file_name)
+        file_lines.append(f"{status} {i+1}. `{safe_name}` ({size_mb:.2f} MB)")
+    
+    files_text = "\n".join(file_lines)
+    
+    # 统计选中信息
+    selected_count = sum(1 for s in selections if s)
+    selected_size = sum(
+        files_info[i][0][2] for i in range(len(files_info)) if selections[i]
+    ) / 1024 / 1024
+    
+    message_text = (
+        f"📱 *Select files to download*\n\n"
+        f"{files_text}\n\n"
+        f"> 💾 *Selected size:* `{selected_size:.2f} MB`\n"
+        f"> 📁 *Selected files:* `{selected_count}/{len(files_info)}`"
+    )
+    
+    if total_pages > 1:
+        message_text += f"\n> 📄 *Page:* `{page + 1}/{total_pages}`"
+    
+    # 构建按钮 - 当前页的文件切换按钮，每行3个
+    keyboard = []
+    row = []
+    for i in range(start_idx, end_idx):
+        status_icon = "✅" if selections[i] else "❌"
+        btn = InlineKeyboardButton(
+            f"{status_icon} {i+1}",
+            callback_data=f"mgs_tog_{media_group_id}_{i}"
+        )
+        row.append(btn)
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    
+    # 分页按钮（如果需要）
+    if total_pages > 1:
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(
+                "⬅️ Prev",
+                callback_data=f"mgs_page_{media_group_id}_{page - 1}"
+            ))
+        if page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton(
+                "Next ➡️",
+                callback_data=f"mgs_page_{media_group_id}_{page + 1}"
+            ))
+        keyboard.append(nav_row)
+    
+    # 全选/全不选按钮
+    all_selected = all(selections)
+    if all_selected:
+        keyboard.append([InlineKeyboardButton(
+            "❌ Deselect All",
+            callback_data=f"mgs_dsall_{media_group_id}"
+        )])
+    else:
+        keyboard.append([InlineKeyboardButton(
+            "✅ Select All",
+            callback_data=f"mgs_sall_{media_group_id}"
+        )])
+    
+    # 确认/取消按钮
+    keyboard.append([
+        InlineKeyboardButton("✅ Confirm", callback_data=f"mgs_conf_{media_group_id}"),
+        InlineKeyboardButton("❌ Cancel", callback_data=f"mgs_cancel_{media_group_id}"),
+    ])
+    
+    await query.edit_message_text(
+        message_text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
 @callback_query_handler()
 @auth_required
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -422,6 +540,224 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         return
     
+    # 处理文件选择相关回调
+    if query.data.startswith("mg_select_"):
+        # 打开文件选择界面
+        media_group_id = query.data[len("mg_select_"):]
+        await _show_file_selection(query, media_group_id, page=0)
+        return
+    
+    if query.data.startswith("mgs_tog_"):
+        # 切换单个文件选中状态
+        parts = query.data[len("mgs_tog_"):]
+        # 最后一个 _ 后面是文件索引
+        last_underscore = parts.rfind("_")
+        media_group_id = parts[:last_underscore]
+        file_idx = int(parts[last_underscore + 1:])
+        
+        if media_group_id in _media_group_file_selections:
+            selections = _media_group_file_selections[media_group_id]
+            if 0 <= file_idx < len(selections):
+                selections[file_idx] = not selections[file_idx]
+        
+        # 计算当前页
+        files_per_page = 8
+        current_page = file_idx // files_per_page
+        await _show_file_selection(query, media_group_id, page=current_page)
+        return
+    
+    if query.data.startswith("mgs_page_"):
+        # 翻页
+        parts = query.data[len("mgs_page_"):]
+        last_underscore = parts.rfind("_")
+        media_group_id = parts[:last_underscore]
+        page = int(parts[last_underscore + 1:])
+        await _show_file_selection(query, media_group_id, page=page)
+        return
+    
+    if query.data.startswith("mgs_sall_"):
+        # 全选
+        media_group_id = query.data[len("mgs_sall_"):]
+        if media_group_id in _media_group_file_selections:
+            _media_group_file_selections[media_group_id] = [True] * len(_media_group_file_selections[media_group_id])
+        await _show_file_selection(query, media_group_id, page=0)
+        return
+    
+    if query.data.startswith("mgs_dsall_"):
+        # 全不选
+        media_group_id = query.data[len("mgs_dsall_"):]
+        if media_group_id in _media_group_file_selections:
+            _media_group_file_selections[media_group_id] = [False] * len(_media_group_file_selections[media_group_id])
+        await _show_file_selection(query, media_group_id, page=0)
+        return
+    
+    if query.data.startswith("mgs_conf_"):
+        # 确认选择并下载
+        media_group_id = query.data[len("mgs_conf_"):]
+        
+        if media_group_id not in _media_group_confirmations:
+            await query.edit_message_text("⚠️ Media group session expired.")
+            return
+        
+        selections = _media_group_file_selections.get(media_group_id, [])
+        if not any(selections):
+            await query.answer("⚠️ Please select at least one file!", show_alert=True)
+            return
+        
+        media_group_info = _media_group_confirmations.pop(media_group_id)
+        files_info = media_group_info['files_info']
+        group_context = media_group_info['context']
+        
+        # 过滤出选中的文件
+        selected_files = [
+            files_info[i] for i in range(len(files_info)) if i < len(selections) and selections[i]
+        ]
+        
+        # 清理选择状态
+        _media_group_file_selections.pop(media_group_id, None)
+        
+        await query.edit_message_text(
+            f"⬇️ Starting download of {len(selected_files)} selected file(s)..."
+        )
+        
+        # 开始下载选中的文件
+        logger.info(f"Starting selective download: {media_group_id}, {len(selected_files)}/{len(files_info)} files")
+        
+        success_count = 0
+        fail_count = 0
+        failed_files = []
+        
+        for (file_id, file_name, file_size), message in selected_files:
+            success = await _download_single_file(
+                file_id, file_name, file_size, message, group_context
+            )
+            if success:
+                success_count += 1
+            else:
+                fail_count += 1
+                failed_files.append((file_id, file_name, file_size, message))
+            await asyncio.sleep(0.5)
+        
+        # 发送总结消息
+        summary_message = (
+            f"📊 *Selective download completed*\n\n"
+            f"> ✅ Successful: `{success_count}`\n"
+            f"> ❌ Failed: `{fail_count}`\n"
+            f"> 📁 Selected: `{len(selected_files)}/{len(files_info)}`"
+        )
+        
+        if failed_files:
+            summary_message += "\n\n🔄 *Failed files can be retried individually*"
+            _media_group_failed_files[media_group_id] = {
+                'failed_files': failed_files,
+                'context': group_context
+            }
+            await query.message.reply_text(
+                summary_message,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton("🔄 Retry All Failed", callback_data=f"retry_media_group_{media_group_id}"),
+                            InlineKeyboardButton("❌ Cancel", callback_data="cancel_retry"),
+                        ]
+                    ]
+                ),
+            )
+        else:
+            await query.message.reply_text(summary_message, parse_mode="Markdown")
+        
+        return
+    
+    if query.data.startswith("mgs_cancel_"):
+        # 取消选择，清理状态
+        media_group_id = query.data[len("mgs_cancel_"):]
+        _media_group_file_selections.pop(media_group_id, None)
+        
+        # 恢复原始确认界面
+        if media_group_id in _media_group_confirmations:
+            media_group_info = _media_group_confirmations[media_group_id]
+            files_info = media_group_info['files_info']
+            
+            # 重新构建文件列表
+            files_list = []
+            total_size = 0
+            for (file_id, file_name, file_size), message in files_info:
+                size_mb = file_size / 1024 / 1024
+                total_size += size_mb
+                safe_name = escape_md(file_name)
+                files_list.append(f"> 📄 `{safe_name}` ({size_mb:.2f} MB)")
+            
+            files_text = "\n".join(files_list)
+            
+            response_message = (
+                f"Are you sure you want to download {len(files_info)} files?\n\n"
+                f"{files_text}\n\n"
+                f"> 💾 *Total size:* `{total_size:.2f} MB`"
+            )
+            
+            await query.edit_message_text(
+                response_message,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton("Yes", callback_data=f"media_group_yes_{media_group_id}"),
+                            InlineKeyboardButton("No", callback_data=f"media_group_no_{media_group_id}"),
+                        ],
+                        [
+                            InlineKeyboardButton("📱 Select Files", callback_data=f"mg_select_{media_group_id}"),
+                        ]
+                    ]
+                ),
+            )
+        else:
+            await query.edit_message_text("Selection cancelled.")
+        
+        return
+
+    # 处理取消重试（在单个文件确认之前拦截）
+    if query.data == "cancel_retry":
+        logger.info("Retry cancelled by user")
+        await query.edit_message_text("Retry cancelled.")
+        return
+    
+    # 处理媒体组重试（在单个文件确认之前拦截）
+    if query.data.startswith("retry_media_group_"):
+        media_group_id = query.data[len("retry_media_group_"):]
+        if media_group_id in _media_group_failed_files:
+            failed_info = _media_group_failed_files.pop(media_group_id)
+            failed_files = failed_info['failed_files']
+            retry_context = failed_info['context']
+            
+            logger.info(f"Retrying {len(failed_files)} failed files from media group {media_group_id}")
+            await query.edit_message_text(f"🔄 Retrying {len(failed_files)} failed file(s)...")
+            
+            success_count = 0
+            fail_count = 0
+            
+            for file_id, file_name, file_size, message in failed_files:
+                success = await _download_single_file(
+                    file_id, file_name, file_size, message, retry_context
+                )
+                if success:
+                    success_count += 1
+                else:
+                    fail_count += 1
+                await asyncio.sleep(0.5)
+            
+            retry_summary = (
+                f"🔄 *Retry completed*\n\n"
+                f"> ✅ Successful: `{success_count}`\n"
+                f"> ❌ Failed: `{fail_count}`\n"
+                f"> 📁 Total retried: `{len(failed_files)}`"
+            )
+            await query.message.reply_text(retry_summary, parse_mode="Markdown")
+        else:
+            logger.warning(f"Media group {media_group_id} not found for retry")
+            await query.edit_message_text("Retry failed: media group not found or expired.")
+        return
+
     # 处理单个文件确认
     message = update.effective_message.reply_to_message
     media = message.document or message.video or message.audio
@@ -445,9 +781,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info(f"Confirmed to download file -> {file_name}")
         await _download_single_file(file_id, file_name, file_size, message, context)
     elif query.data.startswith("retry_"):
-        # 处理重试逻辑
+        # 处理单个文件重试逻辑
         short_file_id = query.data.split("_", 1)[1]
-        # 检查简化的文件ID是否匹配
         expected_short_id = file_id[-8:] if len(file_id) > 8 else file_id
         if short_file_id == expected_short_id:
             logger.info(f"Retrying download for file -> {file_name}")
@@ -455,44 +790,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             logger.warning(f"Retry file ID mismatch: expected {expected_short_id}, got {short_file_id}")
             await query.message.reply_text("Retry failed: file ID mismatch.")
-    elif query.data == "cancel_retry":
-        logger.info("Retry cancelled by user")
-        await query.message.reply_text("Retry cancelled.")
-    elif query.data.startswith("retry_media_group_"):
-        # 处理媒体组重试逻辑
-        media_group_id = query.data.split("_", 3)[3]
-        if media_group_id in _media_group_failed_files:
-            failed_info = _media_group_failed_files.pop(media_group_id)
-            failed_files = failed_info['failed_files']
-            retry_context = failed_info['context']
-            
-            logger.info(f"Retrying {len(failed_files)} failed files from media group {media_group_id}")
-            
-            success_count = 0
-            fail_count = 0
-            
-            for file_id, file_name, file_size, message in failed_files:
-                success = await _download_single_file(
-                    file_id, file_name, file_size, message, retry_context
-                )
-                if success:
-                    success_count += 1
-                else:
-                    fail_count += 1
-                # 给每个文件下载之间一点间隔
-                await asyncio.sleep(0.5)
-            
-            # 发送重试总结消息
-            retry_summary = (
-                f"🔄 *Retry completed*\n\n"
-                f"> ✅ Successful: `{success_count}`\n"
-                f"> ❌ Failed: `{fail_count}`\n"
-                f"> 📁 Total retried: `{len(failed_files)}`"
-            )
-            await query.message.reply_text(retry_summary, parse_mode="Markdown")
-        else:
-            logger.warning(f"Media group {media_group_id} not found for retry")
-            await query.message.reply_text("Retry failed: media group not found.")
     else:
         logger.info("Download cancelled")
         await message.reply_text("Download cancelled.")
