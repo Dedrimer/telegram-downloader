@@ -50,6 +50,56 @@ _media_group_failed_files = {}
 # 存储媒体组文件选择状态
 _media_group_file_selections = {}
 
+# 存储当前下载任务，用于从 /status 取消下载
+_download_tasks = {}
+
+# 存储 /status 取消下载选择状态
+_status_cancel_selections = {}
+
+def _build_status_cancel_keyboard(status_session_id: str, file_ids: List[str], selected: List[bool]):
+    keyboard = []
+    row = []
+    active_file_ids = [file_id for file_id in file_ids if file_id in downloading_files]
+    total_pages = math.ceil(len(active_file_ids) / 8) if active_file_ids else 1
+    page = int(_status_cancel_selections.get(status_session_id, {}).get('page', 0))
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * 8
+    end_idx = start_idx + 8
+    active_index_set = set(active_file_ids[start_idx:end_idx])
+
+    for i, file_id in enumerate(file_ids):
+        if file_id not in active_index_set:
+            continue
+        icon = "✅" if i < len(selected) and selected[i] else "❌"
+        row.append(InlineKeyboardButton(f"{icon} {i + 1}", callback_data=f"stc_tog_{status_session_id}_{i}"))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    if total_pages > 1:
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"stc_page_{status_session_id}_{page - 1}"))
+        if page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton("Next ➡️", callback_data=f"stc_page_{status_session_id}_{page + 1}"))
+        keyboard.append(nav_row)
+
+    active_indexes = [i for i, file_id in enumerate(file_ids) if file_id in downloading_files]
+    all_selected = bool(active_indexes) and all(selected[i] for i in active_indexes)
+    keyboard.append([
+        InlineKeyboardButton(
+            "❌ Deselect All" if all_selected else "✅ Select All",
+            callback_data=f"stc_dsall_{status_session_id}" if all_selected else f"stc_sall_{status_session_id}",
+        )
+    ])
+    keyboard.append([
+        InlineKeyboardButton("🛑 Cancel Selected", callback_data=f"stc_conf_{status_session_id}"),
+        InlineKeyboardButton("Close", callback_data=f"stc_close_{status_session_id}"),
+    ])
+    return keyboard
+
 # 🌟 定义用于 Markdown V1 的转义函数（这可以绕过 V2 的各种麻烦限制）
 def escape_md(text: str) -> str:
     if not isinstance(text, str):
@@ -69,19 +119,28 @@ def escape_md2(text: str) -> str:
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\])', r'\\\1', text)
 
 @command_handler("status")
+@auth_required
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not downloading_files:
         await update.message.reply_text("No files are being downloaded at the moment.")
         return
 
-    status_message = "*Downloading files status:*\nPage 1\n"
-    for i, file in enumerate(downloading_files.values(), start=1):
+    files_items = list(downloading_files.items())
+    status_session_id = str(update.effective_chat.id)
+    _status_cancel_selections[status_session_id] = {
+        'file_ids': [file_id for file_id, _ in files_items],
+        'selected': [False] * len(files_items),
+        'page': 0,
+    }
+
+    status_message = "*Downloading files status:*\n"
+    for i, (file_id, file) in enumerate(files_items, start=1):
         # 🌟 使用转义函数处理文件名和状态等字符串
         safe_file_name = escape_md(file.file_name)
         safe_status = escape_md(file.status)
         
         file_status = (
-            f"> 📄 *File name:* `{safe_file_name}`\n"
+            f"> {i}. 📄 *File name:* `{safe_file_name}`\n"
             f"> 💾 *File size:* `{escape_md(file.file_size_mb)}`\n"
             f"> ⏰ *Start time:* `{escape_md(file.start_datetime)}`\n"
             f"> ⏱ *Duration:* `{escape_md(file.current_download_duration)}`\n"
@@ -90,16 +149,22 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         status_message += file_status
 
-        if i % 2 == 0 or i == len(downloading_files):
-            if i > 2:
-                status_message = f"Page {math.ceil(i / 2)}\n" + status_message
-            await context.bot.send_message(
-                chat_id=update.message.chat_id,
-                text=status_message,
-                parse_mode="Markdown",
-            )
-            status_message = ""
-            await asyncio.sleep(0.3)
+    keyboard = _build_status_cancel_keyboard(
+        status_session_id,
+        [file_id for file_id, _ in files_items],
+        [False] * len(files_items),
+    )
+
+    status_message += (
+        "\nSelect files below, then press *Cancel Selected* to cancel downloads.\n"
+        "❌ means not selected, ✅ means selected."
+    )
+
+    await update.message.reply_text(
+        status_message,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 async def _handle_media_group_download(
     files_info: List[Tuple[Tuple[str, str, int], Message]],
@@ -230,6 +295,10 @@ async def _download_single_file(
     """
     下载单个文件
     """
+    task = asyncio.current_task()
+    if task:
+        _download_tasks[file_id] = task
+
     try:
         check_file_exists(file_id, file_name)
     except Exception as e:
@@ -246,10 +315,17 @@ async def _download_single_file(
 
     try:
         new_file = await get_file(context.bot, download_file)
+    except asyncio.CancelledError:
+        logger.info(f"Download cancelled for file: {file_name}")
+        downloading_files.pop(file_id, None)
+        _download_tasks.pop(file_id, None)
+        await message.reply_text(f"🛑 Download cancelled: {escape_md(file_name)}")
+        return False
     except Exception as e:
         logger.error(f"Error downloading file: {e}")
         traceback.print_exc()
         downloading_files.pop(file_id, None)
+        _download_tasks.pop(file_id, None)
         error_text = escape_md(str(e))
         safe_file_name = escape_md(file_name)
         
@@ -302,6 +378,7 @@ async def _download_single_file(
                 break
         if not found:
             logger.error(f"Cannot locate the downloaded file anywhere inside {BOT_API_DIR}")
+            _download_tasks.pop(file_id, None)
             await message.reply_text(escape_md("⛔ Internal error: Could not locate downloaded file on disk."), parse_mode="Markdown")
             return False
 
@@ -317,6 +394,7 @@ async def _download_single_file(
         except Exception as rename_error:
             logger.error(f"Error RENAMING file (Fallback failed): {rename_error}")
             downloading_files.pop(file_id, None)
+            _download_tasks.pop(file_id, None)
             
             move_error_text = escape_md(str(move_error) + "\n" + str(rename_error))
             safe_target = escape_md(target_api_file)
@@ -326,10 +404,12 @@ async def _download_single_file(
                 f"⛔ Error moving file\n> Source: `{safe_target}`\n> Target: `{safe_move_to}`\nErrors:\n```\n{move_error_text}```",
                 parse_mode="Markdown",
             )
+            _download_tasks.pop(file_id, None)
             return False
 
     download_file.move_complete()
     downloading_files.pop(file_id, None)
+    _download_tasks.pop(file_id, None)
 
     if platform.system() == "Linux":
         try:
@@ -460,12 +540,158 @@ async def _show_file_selection(
     )
 
 
+async def _show_status_cancel_selection(query, status_session_id: str):
+    """
+    刷新 /status 的取消下载选择界面
+    """
+    session = _status_cancel_selections.get(status_session_id)
+    if not session:
+        await query.edit_message_text("Status selection session expired.")
+        return
+
+    file_ids = session['file_ids']
+    selected = session['selected']
+
+    lines = ["*Downloading files status:*\n"]
+    active_count = 0
+    for i, file_id in enumerate(file_ids):
+        file = downloading_files.get(file_id)
+        mark = "✅" if i < len(selected) and selected[i] else "❌"
+        if file:
+            active_count += 1
+            safe_file_name = escape_md(file.file_name)
+            safe_status = escape_md(file.status)
+            lines.append(
+                f"> {mark} {i + 1}. 📄 *File name:* `{safe_file_name}`\n"
+                f"> 💾 *File size:* `{escape_md(file.file_size_mb)}`\n"
+                f"> ⏰ *Start time:* `{escape_md(file.start_datetime)}`\n"
+                f"> ⏱ *Duration:* `{escape_md(file.current_download_duration)}`\n"
+                f"> 🔻 *Retries:* `{file.download_retries}`\n"
+                f"> 🔄 *Status:* `{safe_status}`\n"
+            )
+        else:
+            lines.append(f"> {mark} {i + 1}. `_Download already finished or removed_`\n")
+
+    if active_count == 0:
+        _status_cancel_selections.pop(status_session_id, None)
+        await query.edit_message_text("No files are being downloaded at the moment.")
+        return
+
+    selected_count = sum(1 for i, s in enumerate(selected) if s and i < len(file_ids) and file_ids[i] in downloading_files)
+    active_file_ids = [file_id for file_id in file_ids if file_id in downloading_files]
+    total_pages = math.ceil(len(active_file_ids) / 8) if active_file_ids else 1
+    page = int(session.get('page', 0))
+    text = "\n".join(lines)
+    text += (
+        f"\n> 🛑 *Selected to cancel:* `{selected_count}/{active_count}`\n"
+        f"> 📄 *Page:* `{page + 1}/{total_pages}`\n\n"
+        "Select files below, then press *Cancel Selected* to cancel downloads.\n"
+        "❌ means not selected, ✅ means selected."
+    )
+
+    keyboard = _build_status_cancel_keyboard(status_session_id, file_ids, selected)
+
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
 @callback_query_handler()
 @auth_required
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Button command received")
     query = update.callback_query
     await query.answer()
+
+    # 处理 /status 取消下载相关回调
+    if query.data.startswith("stc_tog_"):
+        parts = query.data[len("stc_tog_"):]
+        last_underscore = parts.rfind("_")
+        status_session_id = parts[:last_underscore]
+        file_idx = int(parts[last_underscore + 1:])
+        session = _status_cancel_selections.get(status_session_id)
+        if session and 0 <= file_idx < len(session['selected']):
+            session['selected'][file_idx] = not session['selected'][file_idx]
+        await _show_status_cancel_selection(query, status_session_id)
+        return
+
+    if query.data.startswith("stc_page_"):
+        parts = query.data[len("stc_page_"):]
+        last_underscore = parts.rfind("_")
+        status_session_id = parts[:last_underscore]
+        page = int(parts[last_underscore + 1:])
+        session = _status_cancel_selections.get(status_session_id)
+        if session:
+            session['page'] = page
+        await _show_status_cancel_selection(query, status_session_id)
+        return
+
+    if query.data.startswith("stc_sall_"):
+        status_session_id = query.data[len("stc_sall_"):]
+        session = _status_cancel_selections.get(status_session_id)
+        if session:
+            for i, file_id in enumerate(session['file_ids']):
+                session['selected'][i] = file_id in downloading_files
+        await _show_status_cancel_selection(query, status_session_id)
+        return
+
+    if query.data.startswith("stc_dsall_"):
+        status_session_id = query.data[len("stc_dsall_"):]
+        session = _status_cancel_selections.get(status_session_id)
+        if session:
+            session['selected'] = [False] * len(session['selected'])
+        await _show_status_cancel_selection(query, status_session_id)
+        return
+
+    if query.data.startswith("stc_conf_"):
+        status_session_id = query.data[len("stc_conf_"):]
+        session = _status_cancel_selections.pop(status_session_id, None)
+        if not session:
+            await query.edit_message_text("Status selection session expired.")
+            return
+
+        selected_file_ids = [
+            file_id
+            for i, file_id in enumerate(session['file_ids'])
+            if i < len(session['selected']) and session['selected'][i] and file_id in downloading_files
+        ]
+
+        if not selected_file_ids:
+            await query.answer("⚠️ Please select at least one downloading file!", show_alert=True)
+            _status_cancel_selections[status_session_id] = session
+            return
+
+        cancelled_names = []
+        missing_count = 0
+        for file_id in selected_file_ids:
+            file = downloading_files.get(file_id)
+            if file:
+                cancelled_names.append(file.file_name)
+            task = _download_tasks.get(file_id)
+            if task and not task.done():
+                task.cancel()
+            else:
+                # 如果没有可取消的任务，至少从状态列表中移除
+                downloading_files.pop(file_id, None)
+                _download_tasks.pop(file_id, None)
+                missing_count += 1
+
+        lines = ["🛑 *Cancel request sent*\n"]
+        for name in cancelled_names:
+            lines.append(f"> 📄 `{escape_md(name)}`")
+        if missing_count:
+            lines.append(f"\n> ⚠️ Missing task records: `{missing_count}`")
+
+        await query.edit_message_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    if query.data.startswith("stc_close_"):
+        status_session_id = query.data[len("stc_close_"):]
+        _status_cancel_selections.pop(status_session_id, None)
+        await query.edit_message_reply_markup(reply_markup=None)
+        return
 
     # 处理媒体组确认
     if query.data.startswith("media_group_yes_") or query.data.startswith("media_group_no_"):
