@@ -370,11 +370,20 @@ async def _download_single_file(
         _download_tasks.pop(file_id, None)
         _download_cancel_tokens.pop(cancel_token, None)
         if status_message:
+            short_file_id = file_id[-8:] if len(file_id) > 8 else file_id
             await _update_download_status(
                 status_message,
                 message,
                 f"🛑 *Download cancelled*\n\n> 📄 *File:* `{escape_md(file_name)}`",
                 parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton("🔄 Retry", callback_data=f"retry_{short_file_id}"),
+                            InlineKeyboardButton("❌ Close", callback_data="cancel_retry"),
+                        ]
+                    ]
+                ),
             )
         return False
     except Exception as e:
