@@ -50,8 +50,11 @@ _media_group_failed_files = {}
 # 存储媒体组文件选择状态
 _media_group_file_selections = {}
 
-# 存储当前下载任务，用于从 /status 取消下载
+# 存储当前下载任务，用于从 /status 或下载状态消息取消下载
 _download_tasks = {}
+
+# 存储下载状态消息取消按钮的短 token 到 file_id 映射
+_download_cancel_tokens = {}
 
 # 存储 /status 取消下载选择状态
 _status_cancel_selections = {}
@@ -339,6 +342,14 @@ async def _download_single_file(
     )
     downloading_files[file_id] = download_file
 
+    cancel_token = file_id[-16:] if len(file_id) > 16 else file_id
+    if cancel_token in _download_cancel_tokens and _download_cancel_tokens[cancel_token] != file_id:
+        cancel_token = str(abs(hash(file_id)))[-16:]
+    _download_cancel_tokens[cancel_token] = file_id
+    cancel_reply_markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🛑 Cancel Download", callback_data=f"dl_cancel_{cancel_token}")]]
+    )
+
     await _update_download_status(
         status_message,
         message,
@@ -348,6 +359,7 @@ async def _download_single_file(
             f"> 💾 *Size:* `{escape_md(download_file.file_size_mb)}`"
         ),
         parse_mode="Markdown",
+        reply_markup=cancel_reply_markup,
     )
 
     try:
@@ -356,6 +368,7 @@ async def _download_single_file(
         logger.info(f"Download cancelled for file: {file_name}")
         downloading_files.pop(file_id, None)
         _download_tasks.pop(file_id, None)
+        _download_cancel_tokens.pop(cancel_token, None)
         if status_message:
             await _update_download_status(
                 status_message,
@@ -369,6 +382,7 @@ async def _download_single_file(
         traceback.print_exc()
         downloading_files.pop(file_id, None)
         _download_tasks.pop(file_id, None)
+        _download_cancel_tokens.pop(cancel_token, None)
         error_text = escape_md(str(e))
         safe_file_name = escape_md(file_name)
         
@@ -424,6 +438,7 @@ async def _download_single_file(
         if not found:
             logger.error(f"Cannot locate the downloaded file anywhere inside {BOT_API_DIR}")
             _download_tasks.pop(file_id, None)
+            _download_cancel_tokens.pop(cancel_token, None)
             await _update_download_status(
                 status_message,
                 message,
@@ -445,6 +460,7 @@ async def _download_single_file(
             logger.error(f"Error RENAMING file (Fallback failed): {rename_error}")
             downloading_files.pop(file_id, None)
             _download_tasks.pop(file_id, None)
+            _download_cancel_tokens.pop(cancel_token, None)
             
             move_error_text = escape_md(str(move_error) + "\n" + str(rename_error))
             safe_target = escape_md(target_api_file)
@@ -462,6 +478,7 @@ async def _download_single_file(
     download_file.move_complete()
     downloading_files.pop(file_id, None)
     _download_tasks.pop(file_id, None)
+    _download_cancel_tokens.pop(cancel_token, None)
 
     if platform.system() == "Linux":
         try:
@@ -662,6 +679,30 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
 
+    # 处理下载状态消息上的取消按钮（/status 的取消按钮仍然保留）
+    if query.data.startswith("dl_cancel_"):
+        cancel_token = query.data[len("dl_cancel_"):]
+        file_id = _download_cancel_tokens.get(cancel_token)
+        if not file_id:
+            await query.edit_message_text("Cancel failed: download task not found or already finished.")
+            return
+
+        file = downloading_files.get(file_id)
+        task = _download_tasks.get(file_id)
+        if task and not task.done():
+            task.cancel()
+            safe_file_name = escape_md(file.file_name if file else file_id)
+            await query.edit_message_text(
+                f"🛑 *Cancelling download...*\n\n> 📄 *File:* `{safe_file_name}`",
+                parse_mode="Markdown",
+            )
+        else:
+            downloading_files.pop(file_id, None)
+            _download_tasks.pop(file_id, None)
+            _download_cancel_tokens.pop(cancel_token, None)
+            await query.edit_message_text("Cancel failed: download task not found or already finished.")
+        return
+
     # 处理 /status 取消下载相关回调
     if query.data.startswith("stc_tog_"):
         parts = query.data[len("stc_tog_"):]
@@ -733,6 +774,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 # 如果没有可取消的任务，至少从状态列表中移除
                 downloading_files.pop(file_id, None)
                 _download_tasks.pop(file_id, None)
+                token_to_remove = None
+                for token, mapped_file_id in _download_cancel_tokens.items():
+                    if mapped_file_id == file_id:
+                        token_to_remove = token
+                        break
+                if token_to_remove:
+                    _download_cancel_tokens.pop(token_to_remove, None)
                 missing_count += 1
 
         lines = ["🛑 *Cancel request sent*\n"]
