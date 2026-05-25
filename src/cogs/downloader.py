@@ -285,12 +285,40 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ),
     )
 
+async def _update_download_status(
+    status_message: Message,
+    fallback_message: Message,
+    text: str,
+    parse_mode: str = None,
+    reply_markup=None,
+):
+    """
+    更新下载状态消息；优先编辑原提示消息，失败时才降级发送新消息
+    """
+    if status_message:
+        try:
+            await status_message.edit_text(
+                text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            )
+            return
+        except Exception as e:
+            logger.warning(f"Failed to edit download status message, fallback to reply: {e}")
+    await fallback_message.reply_text(
+        text,
+        parse_mode=parse_mode,
+        reply_markup=reply_markup,
+    )
+
+
 async def _download_single_file(
     file_id: str,
     file_name: str,
     file_size: int,
     message: Message,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
+    status_message: Message = None,
 ) -> bool:
     """
     下载单个文件
@@ -311,7 +339,16 @@ async def _download_single_file(
     )
     downloading_files[file_id] = download_file
 
-    await message.reply_text(f"⬇️ Downloading file: {escape_md(file_name)}")
+    await _update_download_status(
+        status_message,
+        message,
+        (
+            f"⬇️ *Downloading file...*\n\n"
+            f"> 📄 *File:* `{escape_md(file_name)}`\n"
+            f"> 💾 *Size:* `{escape_md(download_file.file_size_mb)}`"
+        ),
+        parse_mode="Markdown",
+    )
 
     try:
         new_file = await get_file(context.bot, download_file)
@@ -319,7 +356,13 @@ async def _download_single_file(
         logger.info(f"Download cancelled for file: {file_name}")
         downloading_files.pop(file_id, None)
         _download_tasks.pop(file_id, None)
-        await message.reply_text(f"🛑 Download cancelled: {escape_md(file_name)}")
+        if status_message:
+            await _update_download_status(
+                status_message,
+                message,
+                f"🛑 *Download cancelled*\n\n> 📄 *File:* `{escape_md(file_name)}`",
+                parse_mode="Markdown",
+            )
         return False
     except Exception as e:
         logger.error(f"Error downloading file: {e}")
@@ -342,7 +385,9 @@ async def _download_single_file(
         # 使用文件ID的最后8位作为回调数据，避免超过Telegram限制
         short_file_id = file_id[-8:] if len(file_id) > 8 else file_id
         
-        await message.reply_text(
+        await _update_download_status(
+            status_message,
+            message,
             retry_message,
             reply_markup=InlineKeyboardMarkup(
                 [
@@ -379,7 +424,12 @@ async def _download_single_file(
         if not found:
             logger.error(f"Cannot locate the downloaded file anywhere inside {BOT_API_DIR}")
             _download_tasks.pop(file_id, None)
-            await message.reply_text(escape_md("⛔ Internal error: Could not locate downloaded file on disk."), parse_mode="Markdown")
+            await _update_download_status(
+                status_message,
+                message,
+                escape_md("⛔ Internal error: Could not locate downloaded file on disk."),
+                parse_mode="Markdown",
+            )
             return False
 
     try:
@@ -400,7 +450,9 @@ async def _download_single_file(
             safe_target = escape_md(target_api_file)
             safe_move_to = escape_md(move_to_path)
             
-            await message.reply_text(
+            await _update_download_status(
+                status_message,
+                message,
                 f"⛔ Error moving file\n> Source: `{safe_target}`\n> Target: `{safe_move_to}`\nErrors:\n```\n{move_error_text}```",
                 parse_mode="Markdown",
             )
@@ -424,7 +476,12 @@ async def _download_single_file(
         f"> 💾 *Size:* `{escape_md(download_file.file_size_mb)}`\n"
         f"> ⏱ *Total Duration:* `{escape_md(download_file.total_duration)}`"
     )
-    await message.reply_text(response_message, parse_mode="Markdown")
+    await _update_download_status(
+        status_message,
+        message,
+        response_message,
+        parse_mode="Markdown",
+    )
     return True
 
 async def _show_file_selection(
@@ -709,8 +766,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         if query.data.startswith("media_group_no_"):
             logger.info(f"Media group download cancelled: {media_group_id}")
-            await query.message.reply_text("Download cancelled.")
+            await query.edit_message_text("Download cancelled.")
             return
+        
+        await query.edit_message_text(
+            f"⬇️ *Batch download started*\n\n"
+            f"> 📁 *Total files:* `{len(files_info)}`\n"
+            f"> ✅ *Successful:* `0`\n"
+            f"> ❌ *Failed:* `0`",
+            parse_mode="Markdown",
+        )
         
         # 开始批量下载
         logger.info(f"Starting media group download: {media_group_id}, {len(files_info)} files")
@@ -719,9 +784,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         fail_count = 0
         failed_files = []
         
-        for (file_id, file_name, file_size), message in files_info:
+        for index, ((file_id, file_name, file_size), message) in enumerate(files_info, start=1):
+            await query.edit_message_text(
+                f"⬇️ *Batch download in progress*\n\n"
+                f"> 📄 *Current:* `{index}/{len(files_info)}` `{escape_md(file_name)}`\n"
+                f"> ✅ *Successful:* `{success_count}`\n"
+                f"> ❌ *Failed:* `{fail_count}`",
+                parse_mode="Markdown",
+            )
             success = await _download_single_file(
-                file_id, file_name, file_size, message, group_context
+                file_id, file_name, file_size, message, group_context, status_message=query.message
             )
             if success:
                 success_count += 1
@@ -742,7 +814,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # 如果有失败的文件，添加重试按钮
         if failed_files:
             summary_message += "\n\n🔄 *Failed files can be retried individually*"
-            await query.message.reply_text(
+            await query.edit_message_text(
                 summary_message, 
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(
@@ -755,7 +827,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 ),
             )
         else:
-            await query.message.reply_text(summary_message, parse_mode="Markdown")
+            await query.edit_message_text(summary_message, parse_mode="Markdown")
         
         # 存储失败文件信息用于重试
         if failed_files:
@@ -853,9 +925,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         fail_count = 0
         failed_files = []
         
-        for (file_id, file_name, file_size), message in selected_files:
+        for index, ((file_id, file_name, file_size), message) in enumerate(selected_files, start=1):
+            await query.edit_message_text(
+                f"⬇️ *Selective download in progress*\n\n"
+                f"> 📄 *Current:* `{index}/{len(selected_files)}` `{escape_md(file_name)}`\n"
+                f"> ✅ *Successful:* `{success_count}`\n"
+                f"> ❌ *Failed:* `{fail_count}`",
+                parse_mode="Markdown",
+            )
             success = await _download_single_file(
-                file_id, file_name, file_size, message, group_context
+                file_id, file_name, file_size, message, group_context, status_message=query.message
             )
             if success:
                 success_count += 1
@@ -878,7 +957,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 'failed_files': failed_files,
                 'context': group_context
             }
-            await query.message.reply_text(
+            await query.edit_message_text(
                 summary_message,
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(
@@ -891,7 +970,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 ),
             )
         else:
-            await query.message.reply_text(summary_message, parse_mode="Markdown")
+            await query.edit_message_text(summary_message, parse_mode="Markdown")
         
         return
     
@@ -962,9 +1041,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             success_count = 0
             fail_count = 0
             
-            for file_id, file_name, file_size, message in failed_files:
+            for index, (file_id, file_name, file_size, message) in enumerate(failed_files, start=1):
+                await query.edit_message_text(
+                    f"🔄 *Retry in progress*\n\n"
+                    f"> 📄 *Current:* `{index}/{len(failed_files)}` `{escape_md(file_name)}`\n"
+                    f"> ✅ *Successful:* `{success_count}`\n"
+                    f"> ❌ *Failed:* `{fail_count}`",
+                    parse_mode="Markdown",
+                )
                 success = await _download_single_file(
-                    file_id, file_name, file_size, message, retry_context
+                    file_id, file_name, file_size, message, retry_context, status_message=query.message
                 )
                 if success:
                     success_count += 1
@@ -978,7 +1064,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"> ❌ Failed: `{fail_count}`\n"
                 f"> 📁 Total retried: `{len(failed_files)}`"
             )
-            await query.message.reply_text(retry_summary, parse_mode="Markdown")
+            await query.edit_message_text(retry_summary, parse_mode="Markdown")
         else:
             logger.warning(f"Media group {media_group_id} not found for retry")
             await query.edit_message_text("Retry failed: media group not found or expired.")
@@ -1005,17 +1091,17 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if query.data == "yes":
         logger.info(f"Confirmed to download file -> {file_name}")
-        await _download_single_file(file_id, file_name, file_size, message, context)
+        await _download_single_file(file_id, file_name, file_size, message, context, status_message=query.message)
     elif query.data.startswith("retry_"):
         # 处理单个文件重试逻辑
         short_file_id = query.data.split("_", 1)[1]
         expected_short_id = file_id[-8:] if len(file_id) > 8 else file_id
         if short_file_id == expected_short_id:
             logger.info(f"Retrying download for file -> {file_name}")
-            await _download_single_file(file_id, file_name, file_size, message, context)
+            await _download_single_file(file_id, file_name, file_size, message, context, status_message=query.message)
         else:
             logger.warning(f"Retry file ID mismatch: expected {expected_short_id}, got {short_file_id}")
-            await query.message.reply_text("Retry failed: file ID mismatch.")
+            await query.edit_message_text("Retry failed: file ID mismatch.")
     else:
         logger.info("Download cancelled")
-        await message.reply_text("Download cancelled.")
+        await query.edit_message_text("Download cancelled.")
