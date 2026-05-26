@@ -22,6 +22,8 @@ services:
             BOT_TOKEN: "${BOT_TOKEN}"
             USER_ID: "${USER_ID}"
             CHAT_ID: "${CHAT_ID}"
+            TELEGRAM_API_ID: "${TELEGRAM_API_ID}"
+            TELEGRAM_API_HASH: "${TELEGRAM_API_HASH}"
         volumes:
             - ${DOWNLOAD_TO_DIR}:/app/downloads
             - ${BOT_API_DIR}:/var/lib/telegram-bot-api

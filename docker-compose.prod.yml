@@ -12,7 +12,10 @@ services:
         restart: unless-stopped
 
     bot:
-        image: ghcr.io/avibn/telegram-downloader:main
+        build:
+            context: https://github.com/Dedrimer/telegram-downloader.git#main
+            dockerfile: Dockerfile
+        image: telegram-downloader:local
         environment:
             LOCAL_BOT_API_URL: "http://telegram-bot-api:8081"
             BOT_API_DIR: "/var/lib/telegram-bot-api/"
@@ -20,6 +23,8 @@ services:
             BOT_TOKEN: "${BOT_TOKEN}"
             USER_ID: "${USER_ID}"
             CHAT_ID: "${CHAT_ID}"
+            TELEGRAM_API_ID: "${TELEGRAM_API_ID}"
+            TELEGRAM_API_HASH: "${TELEGRAM_API_HASH}"
         volumes:
             - ${DOWNLOAD_TO_DIR}:/app/downloads
             - ${BOT_API_DIR}:/var/lib/telegram-bot-api

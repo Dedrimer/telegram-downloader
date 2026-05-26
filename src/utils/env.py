@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     DOWNLOAD_TO_DIR: str
     USER_ID: str
     CHAT_ID: str
+    TELEGRAM_API_ID: int | None = None
+    TELEGRAM_API_HASH: str | None = None
 
 
 logger.info("Loading environment variables")

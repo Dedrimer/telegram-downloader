@@ -4,7 +4,6 @@ import math
 import os
 import platform
 import re
-import shutil
 import traceback
 from typing import List, Tuple
 
@@ -23,23 +22,16 @@ from ..middlewares.handlers import (
     message_handler,
 )
 from ..models import DownloadFile, downloading_files
-from ..utils import check_file_exists, env, get_file
+from ..utils import check_file_exists, download_file_to_path, env
 from ..utils.media_group import get_media_info, process_media_group
 
 logger = logging.getLogger(__name__)
 
-# Environment variables
-BOT_TOKEN = env.BOT_TOKEN
-BOT_API_DIR = env.BOT_API_DIR
 DOWNLOAD_TO_DIR = env.DOWNLOAD_TO_DIR
 
 # 确保最后带上反斜杠，作为代码层的终极防护
-if not BOT_API_DIR.endswith("/"):
-    BOT_API_DIR += "/"
 if not DOWNLOAD_TO_DIR.endswith("/"):
     DOWNLOAD_TO_DIR += "/"
-
-TOKEN_SUB_DIR = BOT_TOKEN.replace(":", ":", 1) if os.name == "nt" else BOT_TOKEN
 
 # 存储媒体组的确认消息
 _media_group_confirmations = {}
@@ -362,8 +354,16 @@ async def _download_single_file(
         reply_markup=cancel_reply_markup,
     )
 
+    move_to_path = os.path.join(DOWNLOAD_TO_DIR, file_name)
+
     try:
-        new_file = await get_file(context.bot, download_file)
+        await download_file_to_path(
+            context.bot,
+            download_file,
+            move_to_path,
+            chat_id=message.chat_id,
+            message_id=message.message_id,
+        )
     except asyncio.CancelledError:
         logger.info(f"Download cancelled for file: {file_name}")
         downloading_files.pop(file_id, None)
@@ -424,66 +424,6 @@ async def _download_single_file(
         return False
     
     download_file.download_complete()
-
-    relative_path = new_file.file_path
-    
-    if not relative_path.startswith(TOKEN_SUB_DIR):
-        target_api_file = os.path.join(BOT_API_DIR, TOKEN_SUB_DIR, relative_path)
-    else:
-        target_api_file = os.path.join(BOT_API_DIR, relative_path)
-
-    move_to_path = os.path.join(DOWNLOAD_TO_DIR, file_name)
-
-    if not os.path.exists(target_api_file):
-        logger.warning(f"Standard path {target_api_file} not found. Attempting recursive search fallback...")
-        file_basename = relative_path.split("/")[-1]
-        found = False
-        for root, dirs, files in os.walk(BOT_API_DIR):
-            if file_basename in files:
-                target_api_file = os.path.join(root, file_basename)
-                found = True
-                logger.info(f"Fallback successful: Found file at {target_api_file}")
-                break
-        if not found:
-            logger.error(f"Cannot locate the downloaded file anywhere inside {BOT_API_DIR}")
-            _download_tasks.pop(file_id, None)
-            _download_cancel_tokens.pop(cancel_token, None)
-            await _update_download_status(
-                status_message,
-                message,
-                escape_md("⛔ Internal error: Could not locate downloaded file on disk."),
-                parse_mode="Markdown",
-            )
-            return False
-
-    try:
-        os.makedirs(DOWNLOAD_TO_DIR, exist_ok=True)
-        # 🌟 shutil.move 会根据文件系统智能判断，能够跨文件系统移动
-        await asyncio.to_thread(shutil.move, target_api_file, move_to_path)
-    except Exception as move_error:
-        logger.error(f"Error MOVING file: {move_error}")
-        try:
-            # 只有在 shutil 失败时，再尝试验名（退化逻辑）
-            os.rename(target_api_file, move_to_path)
-        except Exception as rename_error:
-            logger.error(f"Error RENAMING file (Fallback failed): {rename_error}")
-            downloading_files.pop(file_id, None)
-            _download_tasks.pop(file_id, None)
-            _download_cancel_tokens.pop(cancel_token, None)
-            
-            move_error_text = escape_md(str(move_error) + "\n" + str(rename_error))
-            safe_target = escape_md(target_api_file)
-            safe_move_to = escape_md(move_to_path)
-            
-            await _update_download_status(
-                status_message,
-                message,
-                f"⛔ Error moving file\n> Source: `{safe_target}`\n> Target: `{safe_move_to}`\nErrors:\n```\n{move_error_text}```",
-                parse_mode="Markdown",
-            )
-            _download_tasks.pop(file_id, None)
-            return False
-
     download_file.move_complete()
     downloading_files.pop(file_id, None)
     _download_tasks.pop(file_id, None)

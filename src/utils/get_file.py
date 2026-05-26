@@ -1,12 +1,17 @@
 import asyncio
 import logging
 import os
-from typing import Optional
+import shutil
 
 from telegram import Bot, File
 from telegram.error import NetworkError, TimedOut, TelegramError
 
 from src.utils.env import env
+from src.utils.telethon_downloader import (
+    download_bot_file_id,
+    download_message_media,
+    is_configured as telethon_configured,
+)
 
 from ..models import DownloadFile, downloading_files
 
@@ -85,6 +90,77 @@ async def get_file(bot: Bot, file: DownloadFile) -> File:
     raise Exception(f"Max retries ({MAX_RETRIES}) reached for file '{file.file_name}'. Last error: {last_exception}")
 
 
+async def download_file_to_path(
+    bot: Bot,
+    file: DownloadFile,
+    target_path: str,
+    chat_id: int | None = None,
+    message_id: int | None = None,
+) -> str:
+    """
+    Download a Telegram file to target_path.
+
+    Prefer MTProto downloads so cancellation stops the active transfer in this process.
+    If MTProto credentials are unavailable, fall back to the legacy local Bot API getFile flow.
+    """
+    temp_path = f"{target_path}.part"
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
+
+    if telethon_configured():
+        try:
+            check_file_exists(file.file_id, file.file_name, check_downloading_files=False)
+            if chat_id is not None and message_id is not None:
+                await download_message_media(
+                    chat_id,
+                    message_id,
+                    file.file_id,
+                    file.file_size,
+                    temp_path,
+                )
+            else:
+                await download_bot_file_id(file.file_id, file.file_size, temp_path)
+            os.replace(temp_path, target_path)
+            return target_path
+        except asyncio.CancelledError:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
+        except Exception:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
+
+    logger.warning(
+        "TELEGRAM_API_ID/TELEGRAM_API_HASH are not configured; falling back to local Bot API "
+        "getFile. Cancelling this fallback may not stop the bot-api container transfer."
+    )
+    new_file = await get_file(bot, file)
+    relative_path = new_file.file_path
+    bot_api_dir = env.BOT_API_DIR
+    if not bot_api_dir.endswith("/"):
+        bot_api_dir += "/"
+    token_sub_dir = env.BOT_TOKEN.replace(":", ":", 1) if os.name == "nt" else env.BOT_TOKEN
+
+    if not relative_path.startswith(token_sub_dir):
+        source_path = os.path.join(bot_api_dir, token_sub_dir, relative_path)
+    else:
+        source_path = os.path.join(bot_api_dir, relative_path)
+
+    if not os.path.exists(source_path):
+        file_basename = relative_path.split("/")[-1]
+        for root, _, files in os.walk(bot_api_dir):
+            if file_basename in files:
+                source_path = os.path.join(root, file_basename)
+                break
+        else:
+            raise RuntimeError(f"Could not locate downloaded file inside {bot_api_dir}")
+
+    os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
+    await asyncio.to_thread(shutil.move, source_path, target_path)
+    return target_path
+
+
 def check_file_exists(
     file_id: str, file_name: str, check_downloading_files: bool = True
 ) -> bool:
@@ -102,7 +178,7 @@ def check_file_exists(
     Raises:
         Exception: If the file already exists in the download directory or is being downloaded.
     """
-    if os.path.exists(DOWNLOAD_TO_DIR + file_name):
+    if os.path.exists(os.path.join(DOWNLOAD_TO_DIR, file_name)):
         raise Exception("File already exists in downloads folder.")
 
     if check_downloading_files:

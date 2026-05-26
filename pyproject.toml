@@ -9,6 +9,7 @@ dependencies = [
     "pydantic>=2.10.3",
     "python-dotenv>=1.0.1",
     "python-telegram-bot>=21.9",
+    "telethon>=1.43.2",
 ]
 
 [tool.uv]
