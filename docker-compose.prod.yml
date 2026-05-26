@@ -12,7 +12,10 @@ services:
         restart: unless-stopped
 
     bot:
-        image: ghcr.io/avibn/telegram-downloader:main
+        build:
+            context: https://github.com/Dedrimer/telegram-downloader.git#main
+            dockerfile: Dockerfile
+        image: telegram-downloader:local
         environment:
             LOCAL_BOT_API_URL: "http://telegram-bot-api:8081"
             BOT_API_DIR: "/var/lib/telegram-bot-api/"

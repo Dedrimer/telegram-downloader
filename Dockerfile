@@ -4,12 +4,9 @@ FROM python:3.11.9-bookworm
 # Install necessary packages
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates
 
-# Add and run the UV installer script
-ADD https://astral.sh/uv/0.5.9/install.sh /uv-installer.sh
-RUN sh /uv-installer.sh && rm /uv-installer.sh
-
-# Set environment variables
-ENV PATH="/root/.local/bin/:$PATH"
+# Install uv via pip to avoid GitHub release download issues
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+RUN python -m pip install --no-cache-dir -i ${PIP_INDEX_URL} uv==0.5.9
 
 # Set working directory in the container to /app
 WORKDIR /app
