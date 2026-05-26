@@ -1,5 +1,4 @@
 from dataclasses import InitVar, dataclass, field
-from dataclasses import InitVar, dataclass, field
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -14,6 +13,7 @@ class DownloadFile:
     retry_delay: float = 2.0
     last_error: Optional[str] = None
     retry_history: List[str] = field(default_factory=list)
+    cancel_requested: bool = False
     _start_datetime: InitVar[datetime] = None
     _finish_download_datetime: datetime = None
     _finish_move_datetime: datetime = None
@@ -26,6 +26,9 @@ class DownloadFile:
 
     def move_complete(self):
         self._finish_move_datetime = datetime.now()
+
+    def request_cancel(self):
+        self.cancel_requested = True
 
     @property
     def current_download_duration(self) -> str:
@@ -61,6 +64,8 @@ class DownloadFile:
             return "Complete"
         if self._finish_download_datetime:
             return "Moving"
+        if self.cancel_requested:
+            return "Cancelling"
         return "Downloading"
 
     @staticmethod

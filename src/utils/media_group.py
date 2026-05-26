@@ -27,7 +27,7 @@ def get_media_info(message: Message) -> Optional[Tuple[str, str, int]]:
         ext = ".mp4" if getattr(message, "video", None) else ".file"
         try:
             ext = "." + media.mime_type.split("/")[-1]
-        except:
+        except Exception:
             pass
         file_name = f"{media.file_id}{ext}"
     else:

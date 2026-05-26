@@ -1,7 +1,10 @@
 import asyncio
+import json
 import logging
 import os
-from typing import Optional
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from telegram import Bot, File
 from telegram.error import NetworkError, TimedOut, TelegramError
@@ -19,6 +22,53 @@ MAX_RETRY_DELAY = 60  # 最大重试延迟时间（秒）
 
 # Environment variables
 DOWNLOAD_TO_DIR = env.DOWNLOAD_TO_DIR
+CANCEL_FILE_DOWNLOAD_TIMEOUT = 10
+CANCELLED_FILE_DOWNLOAD_TEXT = "file download was cancelled"
+
+
+def is_cancelled_file_download_error(error: BaseException) -> bool:
+    return CANCELLED_FILE_DOWNLOAD_TEXT in str(error).lower()
+
+
+def _cancel_file_download_sync(file_id: str) -> bool:
+    url = (
+        f"{env.LOCAL_BOT_API_URL.rstrip('/')}"
+        f"/bot{env.BOT_TOKEN}/cancelFileDownload"
+    )
+    request = Request(
+        url,
+        data=urlencode({"file_id": file_id}).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+
+    try:
+        with urlopen(request, timeout=CANCEL_FILE_DOWNLOAD_TIMEOUT) as response:
+            payload = json.loads(response.read())
+    except HTTPError as error:
+        body = error.read()
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            raise TelegramError(str(error)) from error
+        description = payload.get("description", str(error))
+        raise TelegramError(description) from error
+    except URLError as error:
+        raise NetworkError(str(error)) from error
+    except json.JSONDecodeError as error:
+        raise TelegramError("Invalid cancelFileDownload response") from error
+
+    if not payload.get("ok"):
+        raise TelegramError(payload.get("description", "cancelFileDownload failed"))
+
+    return bool(payload.get("result"))
+
+
+async def cancel_file_download(file_id: str) -> bool:
+    """
+    Ask the local Telegram Bot API server to cancel an in-progress getFile download.
+    """
+    return await asyncio.to_thread(_cancel_file_download_sync, file_id)
 
 
 async def get_file(bot: Bot, file: DownloadFile) -> File:
@@ -36,6 +86,9 @@ async def get_file(bot: Bot, file: DownloadFile) -> File:
     last_exception = None
     
     for attempt in range(MAX_RETRIES):
+        if file.cancel_requested:
+            raise asyncio.CancelledError
+
         # Log attempt
         logger.info(f"Downloading file '{file.file_name}', attempt {attempt + 1}/{MAX_RETRIES}")
         file.download_retries = attempt
@@ -48,16 +101,23 @@ async def get_file(bot: Bot, file: DownloadFile) -> File:
             logger.info(f"File '{file.file_name}' downloaded successfully on attempt {attempt + 1}")
             return new_file
         except NetworkError as e:
+            if file.cancel_requested or is_cancelled_file_download_error(e):
+                raise asyncio.CancelledError from e
             last_exception = e
             logger.error(f"Network error on attempt {attempt + 1}: {e}")
             file.last_error = f"Network error: {str(e)}"
             file.retry_history.append(f"Attempt {attempt + 1}: Network error - {str(e)}")
         except TimedOut as e:
+            if file.cancel_requested or is_cancelled_file_download_error(e):
+                raise asyncio.CancelledError from e
             last_exception = e
             logger.error(f"Timeout error on attempt {attempt + 1}: {e}")
             file.last_error = f"Timeout error: {str(e)}"
             file.retry_history.append(f"Attempt {attempt + 1}: Timeout error - {str(e)}")
         except TelegramError as e:
+            if file.cancel_requested or is_cancelled_file_download_error(e):
+                file.last_error = f"Telegram error: {str(e)}"
+                raise asyncio.CancelledError from e
             last_exception = e
             logger.error(f"Telegram error on attempt {attempt + 1}: {e}")
             file.last_error = f"Telegram error: {str(e)}"

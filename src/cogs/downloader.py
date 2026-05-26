@@ -23,8 +23,8 @@ from ..middlewares.handlers import (
     message_handler,
 )
 from ..models import DownloadFile, downloading_files
-from ..utils import check_file_exists, env, get_file
-from ..utils.media_group import get_media_info, process_media_group
+from ..utils import cancel_file_download, check_file_exists, env, get_file
+from ..utils.media_group import process_media_group
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,37 @@ _download_cancel_tokens = {}
 
 # 存储 /status 取消下载选择状态
 _status_cancel_selections = {}
+
+
+def _remove_download_cancel_token(file_id: str) -> None:
+    for token, mapped_file_id in list(_download_cancel_tokens.items()):
+        if mapped_file_id == file_id:
+            _download_cancel_tokens.pop(token, None)
+            return
+
+
+async def _cancel_download(file_id: str) -> bool:
+    download_file = downloading_files.get(file_id)
+    if download_file:
+        download_file.request_cancel()
+
+    api_cancelled = False
+    try:
+        api_cancelled = await cancel_file_download(file_id)
+        logger.info("cancelFileDownload returned %s for file_id %s", api_cancelled, file_id)
+    except Exception as e:
+        logger.warning("cancelFileDownload failed for file_id %s: %s", file_id, e)
+
+    task = _download_tasks.get(file_id)
+    if task and not task.done():
+        task.cancel()
+        return True
+
+    downloading_files.pop(file_id, None)
+    _download_tasks.pop(file_id, None)
+    _remove_download_cancel_token(file_id)
+    return api_cancelled
+
 
 def _build_status_cancel_keyboard(status_session_id: str, file_ids: List[str], selected: List[bool]):
     keyboard = []
@@ -248,7 +279,7 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ext = ".mp4" if getattr(update.message, "video", None) else ".file"
         try:
              ext = "." + media.mime_type.split("/")[-1]
-        except:
+        except Exception:
              pass
         file_name = f"{media.file_id}{ext}"
     else:
@@ -697,9 +728,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         file = downloading_files.get(file_id)
-        task = _download_tasks.get(file_id)
-        if task and not task.done():
-            task.cancel()
+        cancel_started = await _cancel_download(file_id)
+        if cancel_started:
             safe_file_name = escape_md(file.file_name if file else file_id)
             await query.edit_message_text(
                 f"🛑 *Cancelling download...*\n\n> 📄 *File:* `{safe_file_name}`",
@@ -776,10 +806,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             file = downloading_files.get(file_id)
             if file:
                 cancelled_names.append(file.file_name)
-            task = _download_tasks.get(file_id)
-            if task and not task.done():
-                task.cancel()
-            else:
+            cancel_started = await _cancel_download(file_id)
+            if not cancel_started:
                 # 如果没有可取消的任务，至少从状态列表中移除
                 downloading_files.pop(file_id, None)
                 _download_tasks.pop(file_id, None)
