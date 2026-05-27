@@ -6,7 +6,7 @@ import platform
 import re
 import shutil
 import traceback
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from telegram import (
     InlineKeyboardButton,
@@ -24,7 +24,7 @@ from ..middlewares.handlers import (
 )
 from ..models import DownloadFile, downloading_files
 from ..utils import cancel_file_download, check_file_exists, env, get_file
-from ..utils.media_group import process_media_group
+from ..utils.media_group import get_media_info, process_media_group
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,21 @@ _download_cancel_tokens = {}
 
 # 存储 /status 取消下载选择状态
 _status_cancel_selections = {}
+
+# Runtime settings for collecting consecutive single-file messages into one batch.
+_SINGLE_FILE_GROUP_MIN_DELAY = 0.1
+_SINGLE_FILE_GROUP_MAX_DELAY = 60.0
+
+
+def _clamp_single_file_group_delay(delay: float) -> float:
+    return max(_SINGLE_FILE_GROUP_MIN_DELAY, min(delay, _SINGLE_FILE_GROUP_MAX_DELAY))
+
+
+_single_file_grouping_enabled = env.SINGLE_FILE_GROUP_ENABLED
+_single_file_grouping_delay = _clamp_single_file_group_delay(env.SINGLE_FILE_GROUP_DELAY)
+_pending_single_file_groups: dict[str, List[Message]] = {}
+_single_file_group_timers: dict[str, asyncio.Task] = {}
+_single_file_group_lock = asyncio.Lock()
 
 
 def _remove_download_cancel_token(file_id: str) -> None:
@@ -200,9 +215,241 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
+
+def _parse_single_file_group_delay(value: str) -> Optional[float]:
+    normalized = value.strip().lower()
+    if normalized.endswith("s"):
+        normalized = normalized[:-1]
+
+    try:
+        delay = float(normalized)
+    except ValueError:
+        return None
+
+    if delay <= 0:
+        return None
+    return _clamp_single_file_group_delay(delay)
+
+
+def _build_single_file_group_id(first_message: Message, last_message: Message) -> str:
+    return f"single-{first_message.chat_id}-{first_message.message_id}-{last_message.message_id}"
+
+
+async def _send_single_file_confirmation(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    media = message.document or message.video or message.audio
+    if not media:
+        logger.warning("No valid media objects found!")
+        return
+
+    info = get_media_info(message)
+    if not info:
+        logger.warning("No valid media info found!")
+        return
+
+    file_id, file_name, file_size = info
+    logger.info(f"Target file name parsed as: {file_name}")
+
+    try:
+        check_file_exists(file_id, file_name)
+    except Exception as e:
+        logger.warning(f"File exist check hit an issue (Ignored): {e}")
+
+    safe_file_name = escape_md(file_name)
+    safe_file_size = escape_md(DownloadFile.convert_size(file_size))
+
+    response_message = (
+        f"Are you sure you want to download the file?\n\n"
+        f"> 📄 *File name:* `{safe_file_name}`\n"
+        f"> 💾 *File size:* `{safe_file_size}`\n"
+    )
+
+    await context.bot.send_message(
+        chat_id=message.chat_id,
+        text=response_message,
+        reply_to_message_id=message.message_id,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Yes", callback_data="yes"),
+                    InlineKeyboardButton("No", callback_data="no"),
+                ]
+            ]
+        ),
+    )
+
+
+async def _queue_single_file_for_grouping(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    if not _single_file_grouping_enabled:
+        return False
+
+    message = update.message
+    if not message or message.media_group_id or not get_media_info(message):
+        return False
+
+    group_key = str(message.chat_id)
+    async with _single_file_group_lock:
+        messages = _pending_single_file_groups.setdefault(group_key, [])
+        messages.append(message)
+
+        timer = _single_file_group_timers.pop(group_key, None)
+        if timer:
+            timer.cancel()
+
+        _single_file_group_timers[group_key] = asyncio.create_task(
+            _delayed_single_file_group_process(
+                group_key,
+                context,
+                _single_file_grouping_delay,
+            )
+        )
+
+    logger.info(
+        "Queued single-file message %s for grouped processing in chat %s",
+        message.message_id,
+        message.chat_id,
+    )
+    return True
+
+
+async def _delayed_single_file_group_process(
+    group_key: str,
+    context: ContextTypes.DEFAULT_TYPE,
+    delay: float,
+) -> None:
+    try:
+        await asyncio.sleep(delay)
+
+        async with _single_file_group_lock:
+            messages = _pending_single_file_groups.pop(group_key, [])
+            _single_file_group_timers.pop(group_key, None)
+
+        if not messages:
+            return
+
+        files_info = []
+        for msg in messages:
+            info = get_media_info(msg)
+            if info:
+                files_info.append((info, msg))
+
+        if not files_info:
+            logger.warning("No valid files found in single-file group %s", group_key)
+            return
+
+        synthetic_group_id = _build_single_file_group_id(messages[0], messages[-1])
+        logger.info(
+            "Processing single-file group %s with %s file(s)",
+            synthetic_group_id,
+            len(files_info),
+        )
+        await _handle_media_group_download(files_info, context, media_group_id=synthetic_group_id)
+
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.error("Error processing single-file group %s: %s", group_key, e)
+        traceback.print_exc()
+
+
+async def _flush_pending_single_file_groups(context: ContextTypes.DEFAULT_TYPE) -> int:
+    async with _single_file_group_lock:
+        pending_groups = list(_pending_single_file_groups.values())
+        _pending_single_file_groups.clear()
+        timers = list(_single_file_group_timers.values())
+        _single_file_group_timers.clear()
+
+    for timer in timers:
+        timer.cancel()
+    if timers:
+        await asyncio.gather(*timers, return_exceptions=True)
+
+    flushed = 0
+    for messages in pending_groups:
+        files_info = []
+        for msg in messages:
+            info = get_media_info(msg)
+            if info:
+                files_info.append((info, msg))
+
+        if not files_info:
+            continue
+
+        flushed += len(files_info)
+        synthetic_group_id = _build_single_file_group_id(messages[0], messages[-1])
+        await _handle_media_group_download(files_info, context, media_group_id=synthetic_group_id)
+
+    return flushed
+
+
+@command_handler("single_group")
+@auth_required
+async def single_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global _single_file_grouping_delay, _single_file_grouping_enabled
+
+    args = context.args or []
+    usage = (
+        "Usage:\n"
+        "/single_group on [seconds] - enable grouped single-file forwarding\n"
+        "/single_group off - disable it\n"
+        "/single_group <seconds> - set delay and enable it\n"
+        "/single_group status - show current setting"
+    )
+
+    if not args or args[0].lower() == "status":
+        state = "ON" if _single_file_grouping_enabled else "OFF"
+        await update.message.reply_text(
+            f"Single-file grouping is {state}.\n"
+            f"Delay: {_single_file_grouping_delay:.2f}s\n\n"
+            f"{usage}"
+        )
+        return
+
+    command = args[0].lower()
+    delay_arg = None
+    enable_after_parse = False
+
+    if command in {"on", "enable", "enabled"}:
+        enable_after_parse = True
+        if len(args) > 1:
+            delay_arg = args[1]
+    elif command in {"off", "disable", "disabled"}:
+        _single_file_grouping_enabled = False
+        flushed = await _flush_pending_single_file_groups(context)
+        suffix = f"\nFlushed {flushed} pending file(s)." if flushed else ""
+        await update.message.reply_text(f"Single-file grouping is OFF.{suffix}")
+        return
+    else:
+        delay_arg = args[0]
+        enable_after_parse = True
+
+    if delay_arg is not None:
+        delay = _parse_single_file_group_delay(delay_arg)
+        if delay is None:
+            await update.message.reply_text(
+                "Invalid delay. Use a positive number of seconds.\n\n" + usage
+            )
+            return
+        _single_file_grouping_delay = delay
+
+    if enable_after_parse:
+        _single_file_grouping_enabled = True
+
+    await update.message.reply_text(
+        f"Single-file grouping is ON.\nDelay: {_single_file_grouping_delay:.2f}s"
+    )
+
+
 async def _handle_media_group_download(
     files_info: List[Tuple[Tuple[str, str, int], Message]],
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
+    media_group_id: Optional[str] = None,
 ):
     """
     处理媒体组的批量下载
@@ -232,7 +479,9 @@ async def _handle_media_group_download(
     )
     
     # 存储媒体组信息用于后续处理
-    media_group_id = first_message.media_group_id
+    media_group_id = media_group_id or first_message.media_group_id
+    if not media_group_id:
+        media_group_id = _build_single_file_group_id(first_message, files_info[-1][1])
     _media_group_confirmations[media_group_id] = {
         'files_info': files_info,
         'context': context
@@ -267,57 +516,13 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         is_media_group = await process_media_group(update, context, _handle_media_group_download)
         if is_media_group:
             return
-    
-    # 处理单个文件
-    media = update.message.document or update.message.video or update.message.audio
-    if not media:
-        logger.warning("No valid media objects found!")
+
+
+    if await _queue_single_file_for_grouping(update, context):
         return
-    
-    raw_name = getattr(media, "file_name", None)
-    if not raw_name:
-        ext = ".mp4" if getattr(update.message, "video", None) else ".file"
-        try:
-             ext = "." + media.mime_type.split("/")[-1]
-        except Exception:
-             pass
-        file_name = f"{media.file_id}{ext}"
-    else:
-        file_name = raw_name
 
-    logger.info(f"Target file name parsed as: {file_name}")
-
-    try:
-        check_file_exists(media.file_id, file_name)
-    except Exception as e:
-        logger.warning(f"File exist check hit an issue (Ignored): {e}")
-
-    file_size = DownloadFile.convert_size(media.file_size)
-    
-    # 🌟 转义动态部分：文件名和文件大小
-    safe_file_name = escape_md(file_name)
-    safe_file_size = escape_md(file_size)
-    
-    response_message = (
-        f"Are you sure you want to download the file?\n\n"
-        f"> 📄 *File name:* `{safe_file_name}`\n"
-        f"> 💾 *File size:* `{safe_file_size}`\n"
-    )
-
-    await context.bot.send_message(
-        chat_id=update.message.chat_id,
-        text=response_message,
-        reply_to_message_id=update.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("Yes", callback_data="yes"),
-                    InlineKeyboardButton("No", callback_data="no"),
-                ]
-            ]
-        ),
-    )
+    # 处理单个文件
+    await _send_single_file_confirmation(update.message, context)
 
 async def _update_download_status(
     status_message: Message,

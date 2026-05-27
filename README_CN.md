@@ -98,6 +98,8 @@
 | `DOWNLOAD_TO_DIR` | 下载文件存储目录 | `./downloads/` |
 | `USER_ID` | 您的 Telegram 用户 ID | `1234567890` |
 | `CHAT_ID` | 机器人操作的聊天 ID | `1234567890` |
+| `SINGLE_FILE_GROUP_ENABLED` | 启动时是否启用单文件连续转发聚合 | `false` |
+| `SINGLE_FILE_GROUP_DELAY` | 单文件聚合等待时间（秒） | `1.0` |
 | `TELEGRAM_API_ID` | Telegram API ID（用于本地 API） | `12345678` |
 | `TELEGRAM_API_HASH` | Telegram API Hash（用于本地 API） | `abcdef1234...` |
 | `TELEGRAM_LOCAL` | 启用本地 API 模式 | `true` |
@@ -130,6 +132,8 @@
    - `/status`: 检查当前下载状态
    - `/info`: 获取用户和聊天信息
    - `/storage`: 检查可用存储空间
+   - `/single_group on [秒数]`: 开启单文件连续转发聚合，例如 `/single_group on 1.5`
+   - `/single_group off`: 关闭单文件连续转发聚合
    - `/help`: 显示所有命令
 
 ### 媒体组功能
@@ -141,6 +145,8 @@
 3. **确认**: 定时器到期后，显示包含所有文件的单个确认消息
 4. **批量下载**: 同时下载所有文件，每个文件独立跟踪进度
 5. **统计**: 完成后显示下载成功/失败数量
+
+开启 `/single_group` 后，不带 `media_group_id` 的连续单文件消息会按同一聊天聚合：收到单文件后等待配置的秒数，期间每收到一个新的单文件都会重置计时器；计时结束后复用媒体组的确认、文件选择和批量下载流程。
 
 ### 故障排除
 

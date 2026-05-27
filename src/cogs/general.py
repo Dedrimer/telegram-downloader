@@ -19,6 +19,7 @@ commands = {
     "/info": "Get user and chat info",
     "/storage": "Get available storage information",
     "/status": "Get downloading files status",
+    "/single_group": "Group consecutive single-file messages into one batch",
 }
 
 

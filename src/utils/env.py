@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     DOWNLOAD_TO_DIR: str
     USER_ID: str
     CHAT_ID: str
+    SINGLE_FILE_GROUP_ENABLED: bool = False
+    SINGLE_FILE_GROUP_DELAY: float = 1.0
 
 
 logger.info("Loading environment variables")

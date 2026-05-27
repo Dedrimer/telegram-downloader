@@ -96,6 +96,8 @@ Create a `.env` file with the following variables:
 | `DOWNLOAD_TO_DIR` | Directory for downloaded files | `./downloads/` |
 | `USER_ID` | Your Telegram user ID | `1234567890` |
 | `CHAT_ID` | Chat ID for bot operation | `1234567890` |
+| `SINGLE_FILE_GROUP_ENABLED` | Enable consecutive single-file grouping at startup | `false` |
+| `SINGLE_FILE_GROUP_DELAY` | Single-file grouping wait time in seconds | `1.0` |
 | `TELEGRAM_API_ID` | Telegram API ID (for local API) | `12345678` |
 | `TELEGRAM_API_HASH` | Telegram API Hash (for local API) | `abcdef1234...` |
 | `TELEGRAM_LOCAL` | Enable local API mode | `true` |
@@ -128,6 +130,8 @@ The **Media Group** feature allows you to download multiple files from a single 
    - `/status`: Check current download status
    - `/info`: Get user and chat information
    - `/storage`: Check available storage space
+   - `/single_group on [seconds]`: Group consecutive single-file messages, e.g. `/single_group on 1.5`
+   - `/single_group off`: Disable consecutive single-file grouping
    - `/help`: Show all commands
 
 ### Media Group Feature
@@ -139,6 +143,8 @@ The media group feature uses a timer-based approach to collect all files:
 3. **Confirmation**: After the timer expires, shows a single confirmation with all files
 4. **Batch Download**: Downloads all files with individual progress tracking
 5. **Statistics**: Shows download success/failure count after completion
+
+When `/single_group` is enabled, consecutive single-file messages without a `media_group_id` are collected per chat. Each new single-file message resets the timer; when no new file arrives before the delay expires, the bot reuses the media-group confirmation, file selection, and batch download flow.
 
 ### Troubleshooting
 
