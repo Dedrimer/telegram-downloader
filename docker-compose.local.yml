@@ -31,6 +31,7 @@ services:
             CHAT_ID: "${CHAT_ID}"
             SINGLE_FILE_GROUP_ENABLED: "${SINGLE_FILE_GROUP_ENABLED:-False}"
             SINGLE_FILE_GROUP_DELAY: "${SINGLE_FILE_GROUP_DELAY:-1.0}"
+            DOWNLOAD_STATUS_UPDATE_INTERVAL: "${DOWNLOAD_STATUS_UPDATE_INTERVAL:-5.0}"
         volumes:
             - ${DOWNLOAD_TO_DIR}:/app/downloads
             - ${BOT_API_DIR}:/var/lib/telegram-bot-api

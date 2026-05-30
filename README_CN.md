@@ -100,6 +100,7 @@
 | `CHAT_ID` | 机器人操作的聊天 ID | `1234567890` |
 | `SINGLE_FILE_GROUP_ENABLED` | 启动时是否启用单文件连续转发聚合 | `false` |
 | `SINGLE_FILE_GROUP_DELAY` | 单文件聚合等待时间（秒） | `1.0` |
+| `DOWNLOAD_STATUS_UPDATE_INTERVAL` | 下载状态更新间隔（秒，最小 3.0） | `5.0` |
 | `TELEGRAM_API_ID` | Telegram API ID（用于本地 API） | `12345678` |
 | `TELEGRAM_API_HASH` | Telegram API Hash（用于本地 API） | `abcdef1234...` |
 | `TELEGRAM_LOCAL` | 启用本地 API 模式 | `true` |

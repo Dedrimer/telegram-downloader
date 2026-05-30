@@ -5,6 +5,7 @@ import os
 import platform
 import re
 import shutil
+import time
 import traceback
 from typing import List, Optional, Tuple
 
@@ -62,14 +63,30 @@ _status_cancel_selections = {}
 # Runtime settings for collecting consecutive single-file messages into one batch.
 _SINGLE_FILE_GROUP_MIN_DELAY = 0.1
 _SINGLE_FILE_GROUP_MAX_DELAY = 60.0
+_DOWNLOAD_PROGRESS_POLL_INTERVAL = 1.0
+_DOWNLOAD_STATUS_UPDATE_DEFAULT_INTERVAL = 5.0
+_DOWNLOAD_STATUS_UPDATE_MIN_INTERVAL = 3.0
+_DOWNLOAD_STATUS_UPDATE_MAX_INTERVAL = 60.0
 
 
 def _clamp_single_file_group_delay(delay: float) -> float:
     return max(_SINGLE_FILE_GROUP_MIN_DELAY, min(delay, _SINGLE_FILE_GROUP_MAX_DELAY))
 
 
+def _clamp_download_status_update_interval(interval: float) -> float:
+    if not math.isfinite(interval) or interval <= 0:
+        return _DOWNLOAD_STATUS_UPDATE_DEFAULT_INTERVAL
+    return max(
+        _DOWNLOAD_STATUS_UPDATE_MIN_INTERVAL,
+        min(interval, _DOWNLOAD_STATUS_UPDATE_MAX_INTERVAL),
+    )
+
+
 _single_file_grouping_enabled = env.SINGLE_FILE_GROUP_ENABLED
 _single_file_grouping_delay = _clamp_single_file_group_delay(env.SINGLE_FILE_GROUP_DELAY)
+_download_status_update_interval = _clamp_download_status_update_interval(
+    env.DOWNLOAD_STATUS_UPDATE_INTERVAL
+)
 _pending_single_file_groups: dict[str, List[Message]] = {}
 _single_file_group_timers: dict[str, asyncio.Task] = {}
 _single_file_group_lock = asyncio.Lock()
@@ -167,6 +184,83 @@ def escape_md2(text: str) -> str:
     # 这里的列表是 Telegram 所有需要转义的特殊字符
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\])', r'\\\1', text)
 
+def _build_download_status_text(download_file: DownloadFile) -> str:
+    return (
+        f"*Downloading file...*\n\n"
+        f"> *File:* `{escape_md(download_file.file_name)}`\n"
+        f"> *Size:* `{escape_md(download_file.file_size_mb)}`\n"
+        f"> *Downloaded:* `{escape_md(download_file.downloaded_size)}`\n"
+        f"> *Progress:* `{escape_md(download_file.download_progress)}`\n"
+        f"> *Speed:* `{escape_md(download_file.download_speed)}`\n"
+        f"> *ETA:* `{escape_md(download_file.remaining_download_time)}`\n"
+        f"> *Duration:* `{escape_md(download_file.current_download_duration)}`\n"
+        f"> *Retries:* `{download_file.download_retries}`"
+    )
+
+
+def _get_bot_api_progress_root() -> str:
+    token_root = os.path.join(BOT_API_DIR, TOKEN_SUB_DIR)
+    if os.path.isdir(token_root):
+        return token_root
+    return BOT_API_DIR
+
+
+def _find_download_progress_size(
+    download_file: DownloadFile,
+    started_at: float,
+    current_path: Optional[str] = None,
+) -> tuple[Optional[int], Optional[str]]:
+    def is_plausible_file(path: str) -> tuple[Optional[int], bool]:
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None, False
+        if not os.path.isfile(path):
+            return None, False
+        if stat.st_mtime < started_at - 2:
+            return None, False
+        if download_file.file_size > 0 and stat.st_size > download_file.file_size:
+            return None, False
+        return stat.st_size, True
+
+    if current_path:
+        size, is_valid = is_plausible_file(current_path)
+        if is_valid:
+            return size, current_path
+
+    root = _get_bot_api_progress_root()
+    best_size = None
+    best_path = None
+    pending_dirs = [root]
+    while pending_dirs:
+        current_dir = pending_dirs.pop()
+        try:
+            entries = list(os.scandir(current_dir))
+        except OSError:
+            continue
+
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    pending_dirs.append(entry.path)
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                stat = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+
+            if stat.st_mtime < started_at - 2:
+                continue
+            if download_file.file_size > 0 and stat.st_size > download_file.file_size:
+                continue
+            if best_size is None or stat.st_size > best_size:
+                best_size = stat.st_size
+                best_path = entry.path
+
+    return best_size, best_path
+
+
 @command_handler("status")
 @auth_required
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -191,6 +285,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         file_status = (
             f"> {i}. 📄 *File name:* `{safe_file_name}`\n"
             f"> 💾 *File size:* `{escape_md(file.file_size_mb)}`\n"
+            f"> *Downloaded:* `{escape_md(file.downloaded_size)}`\n"
+            f"> *Progress:* `{escape_md(file.download_progress)}`\n"
+            f"> *Speed:* `{escape_md(file.download_speed)}`\n"
             f"> ⏰ *Start time:* `{escape_md(file.start_datetime)}`\n"
             f"> ⏱ *Duration:* `{escape_md(file.current_download_duration)}`\n"
             f"> 🔻 *Retries:* `{file.download_retries}`\n"
@@ -530,6 +627,7 @@ async def _update_download_status(
     text: str,
     parse_mode: str = None,
     reply_markup=None,
+    fallback: bool = True,
 ):
     """
     更新下载状态消息；优先编辑原提示消息，失败时才降级发送新消息
@@ -544,11 +642,56 @@ async def _update_download_status(
             return
         except Exception as e:
             logger.warning(f"Failed to edit download status message, fallback to reply: {e}")
+    if not fallback:
+        return
     await fallback_message.reply_text(
         text,
         parse_mode=parse_mode,
         reply_markup=reply_markup,
     )
+
+
+async def _monitor_download_progress(
+    download_file: DownloadFile,
+    status_message: Message,
+    fallback_message: Message,
+    reply_markup,
+) -> None:
+    if not status_message:
+        return
+
+    started_at = time.time()
+    last_update_at = time.monotonic()
+    progress_path = None
+
+    try:
+        while True:
+            await asyncio.sleep(_DOWNLOAD_PROGRESS_POLL_INTERVAL)
+
+            progress_size, progress_path = await asyncio.to_thread(
+                _find_download_progress_size,
+                download_file,
+                started_at,
+                progress_path,
+            )
+            if progress_size is not None:
+                download_file.update_progress(progress_size)
+
+            now = time.monotonic()
+            if now - last_update_at < _download_status_update_interval:
+                continue
+
+            last_update_at = now
+            await _update_download_status(
+                status_message,
+                fallback_message,
+                _build_download_status_text(download_file),
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+                fallback=False,
+            )
+    except asyncio.CancelledError:
+        pass
 
 
 async def _download_single_file(
@@ -589,16 +732,21 @@ async def _download_single_file(
     await _update_download_status(
         status_message,
         message,
-        (
-            f"⬇️ *Downloading file...*\n\n"
-            f"> 📄 *File:* `{escape_md(file_name)}`\n"
-            f"> 💾 *Size:* `{escape_md(download_file.file_size_mb)}`"
-        ),
+        _build_download_status_text(download_file),
         parse_mode="Markdown",
         reply_markup=cancel_reply_markup,
     )
 
+    progress_task = None
     try:
+        progress_task = asyncio.create_task(
+            _monitor_download_progress(
+                download_file,
+                status_message,
+                message,
+                cancel_reply_markup,
+            )
+        )
         new_file = await get_file(context.bot, download_file)
     except asyncio.CancelledError:
         logger.info(f"Download cancelled for file: {file_name}")
@@ -658,6 +806,10 @@ async def _download_single_file(
             ),
         )
         return False
+    finally:
+        if progress_task:
+            progress_task.cancel()
+            await asyncio.gather(progress_task, return_exceptions=True)
     
     download_file.download_complete()
 
@@ -883,6 +1035,9 @@ async def _show_status_cancel_selection(query, status_session_id: str):
             lines.append(
                 f"> {mark} {i + 1}. 📄 *File name:* `{safe_file_name}`\n"
                 f"> 💾 *File size:* `{escape_md(file.file_size_mb)}`\n"
+                f"> *Downloaded:* `{escape_md(file.downloaded_size)}`\n"
+                f"> *Progress:* `{escape_md(file.download_progress)}`\n"
+                f"> *Speed:* `{escape_md(file.download_speed)}`\n"
                 f"> ⏰ *Start time:* `{escape_md(file.start_datetime)}`\n"
                 f"> ⏱ *Duration:* `{escape_md(file.current_download_duration)}`\n"
                 f"> 🔻 *Retries:* `{file.download_retries}`\n"
