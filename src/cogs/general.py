@@ -1,4 +1,5 @@
 import logging
+import html
 import os
 import shutil
 
@@ -23,15 +24,26 @@ commands = {
 }
 
 
+def _build_help_message() -> str:
+    commands_list = "The following commands are available:\n" + "\n".join(
+        [
+            f"<code>{html.escape(key)}</code> - {html.escape(value)}"
+            for key, value in commands.items()
+        ]
+    )
+    return (
+        f"{commands_list}\n\n"
+        "Send me a file and I'll download it to "
+        f"<code>{html.escape(DOWNLOAD_TO_DIR)}</code>."
+    )
+
+
 @command_handler("help")
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a list of available commands to the user."""
-    commands_list = "The following commands are available:\n" + "\n".join(
-        [f"{key} - {value}" for key, value in commands.items()]
-    )
     await update.message.reply_text(
-        f"{commands_list}\n\nSend me a file and I'll download it to `{DOWNLOAD_TO_DIR}`.",
-        parse_mode="markdown",
+        _build_help_message(),
+        parse_mode="HTML",
     )
 
 
