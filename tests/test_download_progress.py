@@ -101,5 +101,86 @@ class DownloadProgressTests(unittest.TestCase):
                 downloader.TOKEN_SUB_DIR = old_token_sub_dir
 
 
+class FakeStatusMessage:
+    def __init__(self, error=None):
+        self.calls = []
+        self.error = error
+
+    async def edit_text(self, text, **kwargs):
+        self.calls.append({"text": text, "kwargs": kwargs})
+        if self.error:
+            raise self.error
+
+
+class FakeFallbackMessage:
+    def __init__(self):
+        self.replies = []
+
+    async def reply_text(self, text, **kwargs):
+        self.replies.append({"text": text, "kwargs": kwargs})
+
+
+class DownloadStatusUpdateTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.old_last_update_at = downloader._progress_status_last_update_at
+        downloader._progress_status_last_update_at = 0.0
+
+    async def asyncTearDown(self):
+        downloader._progress_status_last_update_at = self.old_last_update_at
+
+    async def test_update_download_status_uses_explicit_timeouts(self):
+        status_message = FakeStatusMessage()
+        fallback_message = FakeFallbackMessage()
+
+        await downloader._update_download_status(
+            status_message,
+            fallback_message,
+            "Downloading",
+            timeout=1.5,
+        )
+
+        self.assertEqual(len(status_message.calls), 1)
+        call_kwargs = status_message.calls[0]["kwargs"]
+        self.assertEqual(call_kwargs["read_timeout"], 1.5)
+        self.assertEqual(call_kwargs["write_timeout"], 1.5)
+        self.assertEqual(call_kwargs["connect_timeout"], 1.5)
+        self.assertEqual(call_kwargs["pool_timeout"], 1.5)
+        self.assertEqual(fallback_message.replies, [])
+
+    async def test_progress_status_update_is_skipped_when_global_lock_is_busy(self):
+        status_message = FakeStatusMessage()
+        fallback_message = FakeFallbackMessage()
+
+        await downloader._progress_status_update_lock.acquire()
+        try:
+            updated = await downloader._try_update_progress_status(
+                status_message,
+                fallback_message,
+                "Progress",
+                reply_markup=None,
+            )
+        finally:
+            downloader._progress_status_update_lock.release()
+
+        self.assertFalse(updated)
+        self.assertEqual(status_message.calls, [])
+        self.assertEqual(fallback_message.replies, [])
+
+    async def test_progress_status_update_does_not_fallback_on_edit_failure(self):
+        status_message = FakeStatusMessage(error=TimeoutError("slow edit"))
+        fallback_message = FakeFallbackMessage()
+
+        updated = await downloader._try_update_progress_status(
+            status_message,
+            fallback_message,
+            "Progress",
+            reply_markup=None,
+        )
+
+        self.assertTrue(updated)
+        self.assertEqual(len(status_message.calls), 1)
+        self.assertEqual(fallback_message.replies, [])
+
+
 if __name__ == "__main__":
     unittest.main()

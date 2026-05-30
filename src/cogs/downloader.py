@@ -72,6 +72,10 @@ _status_cancel_selections = {}
 _SINGLE_FILE_GROUP_MIN_DELAY = 0.1
 _SINGLE_FILE_GROUP_MAX_DELAY = 60.0
 _DOWNLOAD_PROGRESS_POLL_INTERVAL = 1.0
+_DOWNLOAD_PROGRESS_GLOBAL_UPDATE_INTERVAL = 1.0
+_DOWNLOAD_PROGRESS_EDIT_TIMEOUT = 2.0
+_DOWNLOAD_STATUS_EDIT_TIMEOUT = 8.0
+_DOWNLOAD_PROGRESS_CANCEL_TIMEOUT = 1.0
 _DOWNLOAD_STATUS_UPDATE_DEFAULT_INTERVAL = 5.0
 _DOWNLOAD_STATUS_UPDATE_MIN_INTERVAL = 3.0
 _DOWNLOAD_STATUS_UPDATE_MAX_INTERVAL = 60.0
@@ -100,6 +104,8 @@ _download_status_update_interval = _clamp_download_status_update_interval(
 _pending_single_file_groups: dict[str, List[Message]] = {}
 _single_file_group_timers: dict[str, asyncio.Task] = {}
 _single_file_group_lock = asyncio.Lock()
+_progress_status_update_lock = asyncio.Lock()
+_progress_status_last_update_at = 0.0
 
 
 def _build_current_runtime_settings() -> RuntimeSettings:
@@ -659,6 +665,8 @@ async def _update_download_status(
     parse_mode: str = None,
     reply_markup=None,
     fallback: bool = True,
+    timeout: float = _DOWNLOAD_STATUS_EDIT_TIMEOUT,
+    log_failed_edit: bool = True,
 ):
     """
     更新下载状态消息；优先编辑原提示消息，失败时才降级发送新消息
@@ -669,17 +677,68 @@ async def _update_download_status(
                 text,
                 parse_mode=parse_mode,
                 reply_markup=reply_markup,
+                read_timeout=timeout,
+                write_timeout=timeout,
+                connect_timeout=timeout,
+                pool_timeout=timeout,
             )
             return
         except Exception as e:
-            logger.warning(f"Failed to edit download status message, fallback to reply: {e}")
+            if log_failed_edit:
+                logger.warning(f"Failed to edit download status message, fallback to reply: {e}")
+            else:
+                logger.debug("Skipped progress status edit after failure: %s", e)
     if not fallback:
         return
-    await fallback_message.reply_text(
-        text,
-        parse_mode=parse_mode,
-        reply_markup=reply_markup,
-    )
+    try:
+        await fallback_message.reply_text(
+            text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+            read_timeout=timeout,
+            write_timeout=timeout,
+            connect_timeout=timeout,
+            pool_timeout=timeout,
+        )
+    except Exception as e:
+        logger.warning("Failed to send fallback download status message: %s", e)
+
+
+async def _try_update_progress_status(
+    status_message: Message,
+    fallback_message: Message,
+    text: str,
+    reply_markup,
+) -> bool:
+    global _progress_status_last_update_at
+
+    if _progress_status_update_lock.locked():
+        return False
+
+    async with _progress_status_update_lock:
+        now = time.monotonic()
+        if now - _progress_status_last_update_at < _DOWNLOAD_PROGRESS_GLOBAL_UPDATE_INTERVAL:
+            return False
+        _progress_status_last_update_at = now
+
+        try:
+            await asyncio.wait_for(
+                _update_download_status(
+                    status_message,
+                    fallback_message,
+                    text,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup,
+                    fallback=False,
+                    timeout=_DOWNLOAD_PROGRESS_EDIT_TIMEOUT,
+                    log_failed_edit=False,
+                ),
+                timeout=_DOWNLOAD_PROGRESS_EDIT_TIMEOUT + 0.5,
+            )
+        except Exception as error:
+            logger.debug("Skipped progress status update: %s", error)
+            return False
+        return True
 
 
 async def _monitor_download_progress(
@@ -713,13 +772,11 @@ async def _monitor_download_progress(
                 continue
 
             last_update_at = now
-            await _update_download_status(
+            await _try_update_progress_status(
                 status_message,
                 fallback_message,
                 _build_download_status_text(download_file),
-                parse_mode="Markdown",
                 reply_markup=reply_markup,
-                fallback=False,
             )
     except asyncio.CancelledError:
         pass
@@ -840,7 +897,13 @@ async def _download_single_file(
     finally:
         if progress_task:
             progress_task.cancel()
-            await asyncio.gather(progress_task, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(progress_task, return_exceptions=True),
+                    timeout=_DOWNLOAD_PROGRESS_CANCEL_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.debug("Progress monitor cancellation timed out for %s", file_id)
     
     download_file.download_complete()
 
