@@ -79,6 +79,9 @@ _DOWNLOAD_PROGRESS_CANCEL_TIMEOUT = 1.0
 _DOWNLOAD_STATUS_UPDATE_DEFAULT_INTERVAL = 5.0
 _DOWNLOAD_STATUS_UPDATE_MIN_INTERVAL = 3.0
 _DOWNLOAD_STATUS_UPDATE_MAX_INTERVAL = 60.0
+_DOWNLOAD_CONCURRENCY_DEFAULT = 1
+_DOWNLOAD_CONCURRENCY_MIN = 1
+_DOWNLOAD_CONCURRENCY_MAX = 8
 
 
 def _clamp_single_file_group_delay(delay: float) -> float:
@@ -94,6 +97,14 @@ def _clamp_download_status_update_interval(interval: float) -> float:
     )
 
 
+def _clamp_max_concurrent_downloads(value: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return _DOWNLOAD_CONCURRENCY_DEFAULT
+    return max(_DOWNLOAD_CONCURRENCY_MIN, min(parsed, _DOWNLOAD_CONCURRENCY_MAX))
+
+
 _single_file_grouping_enabled = runtime_settings.single_file_group_enabled
 _single_file_grouping_delay = _clamp_single_file_group_delay(
     runtime_settings.single_file_group_delay
@@ -101,6 +112,8 @@ _single_file_grouping_delay = _clamp_single_file_group_delay(
 _download_status_update_interval = _clamp_download_status_update_interval(
     runtime_settings.download_status_update_interval
 )
+_max_concurrent_downloads = _clamp_max_concurrent_downloads(env.MAX_CONCURRENT_DOWNLOADS)
+_download_semaphore = asyncio.Semaphore(_max_concurrent_downloads)
 _pending_single_file_groups: dict[str, List[Message]] = {}
 _single_file_group_timers: dict[str, asyncio.Task] = {}
 _single_file_group_lock = asyncio.Lock()
@@ -218,10 +231,12 @@ def escape_md2(text: str) -> str:
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\])', r'\\\1', text)
 
 def _build_download_status_text(download_file: DownloadFile) -> str:
+    title = "*Queued file...*" if download_file.queued else "*Downloading file...*"
     return (
-        f"*Downloading file...*\n\n"
+        f"{title}\n\n"
         f"> *File:* `{escape_md(download_file.file_name)}`\n"
         f"> *Size:* `{escape_md(download_file.file_size_mb)}`\n"
+        f"> *Status:* `{escape_md(download_file.status)}`\n"
         f"> *Downloaded:* `{escape_md(download_file.downloaded_size)}`\n"
         f"> *Progress:* `{escape_md(download_file.download_progress)}`\n"
         f"> *Speed:* `{escape_md(download_file.download_speed)}`\n"
@@ -817,16 +832,40 @@ async def _download_single_file(
         [[InlineKeyboardButton("🛑 Cancel Download", callback_data=f"dl_cancel_{cancel_token}")]]
     )
 
-    await _update_download_status(
-        status_message,
-        message,
-        _build_download_status_text(download_file),
-        parse_mode="Markdown",
-        reply_markup=cancel_reply_markup,
-    )
+    if _download_semaphore.locked():
+        download_file.mark_queued()
+        await _update_download_status(
+            status_message,
+            message,
+            _build_download_status_text(download_file),
+            parse_mode="Markdown",
+            reply_markup=cancel_reply_markup,
+        )
 
     progress_task = None
+    download_slot_acquired = False
+    download_completed = False
+
+    def release_download_slot() -> None:
+        nonlocal download_slot_acquired
+        if download_slot_acquired:
+            _download_semaphore.release()
+            download_slot_acquired = False
+
     try:
+        await _download_semaphore.acquire()
+        download_slot_acquired = True
+        download_file.mark_downloading()
+        await _update_download_status(
+            status_message,
+            message,
+            _build_download_status_text(download_file),
+            parse_mode="Markdown",
+            reply_markup=cancel_reply_markup,
+        )
+        if download_file.cancel_requested:
+            raise asyncio.CancelledError
+
         progress_task = asyncio.create_task(
             _monitor_download_progress(
                 download_file,
@@ -836,6 +875,7 @@ async def _download_single_file(
             )
         )
         new_file = await get_file(context.bot, download_file)
+        download_completed = True
     except asyncio.CancelledError:
         logger.info(f"Download cancelled for file: {file_name}")
         downloading_files.pop(file_id, None)
@@ -904,12 +944,29 @@ async def _download_single_file(
                 )
             except asyncio.TimeoutError:
                 logger.debug("Progress monitor cancellation timed out for %s", file_id)
+        if not download_completed:
+            release_download_slot()
     
     download_file.download_complete()
 
     relative_path = new_file.file_path
-    
-    if not relative_path.startswith(TOKEN_SUB_DIR):
+    if not relative_path:
+        logger.error("Bot API returned an empty file path for %s", file_id)
+        downloading_files.pop(file_id, None)
+        _download_tasks.pop(file_id, None)
+        _download_cancel_tokens.pop(cancel_token, None)
+        await _update_download_status(
+            status_message,
+            message,
+            escape_md("Internal error: Bot API returned an empty file path."),
+            parse_mode="Markdown",
+        )
+        release_download_slot()
+        return False
+
+    if os.path.isabs(relative_path):
+        target_api_file = relative_path
+    elif not relative_path.startswith(TOKEN_SUB_DIR):
         target_api_file = os.path.join(BOT_API_DIR, TOKEN_SUB_DIR, relative_path)
     else:
         target_api_file = os.path.join(BOT_API_DIR, relative_path)
@@ -936,6 +993,7 @@ async def _download_single_file(
                 escape_md("⛔ Internal error: Could not locate downloaded file on disk."),
                 parse_mode="Markdown",
             )
+            release_download_slot()
             return False
 
     try:
@@ -964,6 +1022,7 @@ async def _download_single_file(
                 parse_mode="Markdown",
             )
             _download_tasks.pop(file_id, None)
+            release_download_slot()
             return False
 
     download_file.move_complete()
@@ -990,6 +1049,7 @@ async def _download_single_file(
         response_message,
         parse_mode="Markdown",
     )
+    release_download_slot()
     return True
 
 async def _show_file_selection(

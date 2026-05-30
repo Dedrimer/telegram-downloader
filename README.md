@@ -102,6 +102,7 @@ Create a `.env` file with the following variables:
 | `SINGLE_FILE_GROUP_ENABLED` | Enable consecutive single-file grouping at startup | `false` |
 | `SINGLE_FILE_GROUP_DELAY` | Single-file grouping wait time in seconds | `1.0` |
 | `DOWNLOAD_STATUS_UPDATE_INTERVAL` | Download status update interval in seconds (minimum 3.0) | `5.0` |
+| `MAX_CONCURRENT_DOWNLOADS` | Maximum number of Bot API file downloads running at the same time | `1` |
 | `TELEGRAM_API_ID` | Telegram API ID (for local API) | `12345678` |
 | `TELEGRAM_API_HASH` | Telegram API Hash (for local API) | `abcdef1234...` |
 | `TELEGRAM_LOCAL` | Enable local API mode | `true` |

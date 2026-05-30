@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     SINGLE_FILE_GROUP_ENABLED: bool = False
     SINGLE_FILE_GROUP_DELAY: float = 1.0
     DOWNLOAD_STATUS_UPDATE_INTERVAL: float = 5.0
+    MAX_CONCURRENT_DOWNLOADS: int = 1
 
 
 logger.info("Loading environment variables")

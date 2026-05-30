@@ -51,6 +51,11 @@ class DownloadProgressTests(unittest.TestCase):
         self.assertEqual(downloader._clamp_download_status_update_interval(10), 10)
         self.assertEqual(downloader._clamp_download_status_update_interval(100), 60.0)
 
+    def test_max_concurrent_downloads_is_clamped(self):
+        self.assertEqual(downloader._clamp_max_concurrent_downloads(0), 1)
+        self.assertEqual(downloader._clamp_max_concurrent_downloads(2), 2)
+        self.assertEqual(downloader._clamp_max_concurrent_downloads(100), 8)
+
     def test_progress_status_text_includes_detailed_fields(self):
         download_file = DownloadFile("file-id", "movie.mkv", 1024)
         download_file.update_progress(512)
@@ -61,6 +66,15 @@ class DownloadProgressTests(unittest.TestCase):
         self.assertIn("*Progress:* `50.00%`", text)
         self.assertIn("*Speed:*", text)
         self.assertIn("*ETA:*", text)
+
+    def test_queued_download_status_is_visible(self):
+        download_file = DownloadFile("file-id", "movie.mkv", 1024)
+        download_file.mark_queued()
+
+        text = downloader._build_download_status_text(download_file)
+
+        self.assertIn("*Queued file...*", text)
+        self.assertIn("*Status:* `Queued`", text)
 
     def test_find_download_progress_size_prefers_recent_plausible_file(self):
         old_bot_api_dir = downloader.BOT_API_DIR

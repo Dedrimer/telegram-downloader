@@ -14,6 +14,7 @@ class DownloadFile:
     last_error: Optional[str] = None
     retry_history: List[str] = field(default_factory=list)
     cancel_requested: bool = False
+    queued: bool = False
     downloaded_bytes: int = 0
     download_speed_bps: float = 0.0
     _start_datetime: InitVar[datetime] = None
@@ -37,6 +38,12 @@ class DownloadFile:
 
     def request_cancel(self):
         self.cancel_requested = True
+
+    def mark_queued(self):
+        self.queued = True
+
+    def mark_downloading(self):
+        self.queued = False
 
     def update_progress(self, downloaded_bytes: int, now: Optional[datetime] = None) -> None:
         now = now or datetime.now()
@@ -111,6 +118,8 @@ class DownloadFile:
             return "Moving"
         if self.cancel_requested:
             return "Cancelling"
+        if self.queued:
+            return "Queued"
         return "Downloading"
 
     @staticmethod
