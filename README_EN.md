@@ -96,6 +96,7 @@ Create a `.env` file with the following variables:
 | `DOWNLOAD_TO_DIR` | Directory for downloaded files | `./downloads/` |
 | `USER_ID` | Your Telegram user ID | `1234567890` |
 | `CHAT_ID` | Chat ID for bot operation | `1234567890` |
+| `APP_SETTINGS_FILE` | Runtime settings JSON path | `./data/settings.json` |
 | `SINGLE_FILE_GROUP_ENABLED` | Enable consecutive single-file grouping at startup | `false` |
 | `SINGLE_FILE_GROUP_DELAY` | Single-file grouping wait time in seconds | `1.0` |
 | `DOWNLOAD_STATUS_UPDATE_INTERVAL` | Download status update interval in seconds (minimum 3.0) | `5.0` |
@@ -146,6 +147,8 @@ The media group feature uses a timer-based approach to collect all files:
 5. **Statistics**: Shows download success/failure count after completion
 
 When `/single_group` is enabled, consecutive single-file messages without a `media_group_id` are collected per chat. Each new single-file message resets the timer; when no new file arrives before the delay expires, the bot reuses the media-group confirmation, file selection, and batch download flow.
+
+Runtime settings are persisted in `data/settings.json` when changed through bot commands. The compose files mount `./data` to `/app/data`; if the JSON file exists, it overrides the environment defaults for saveable settings such as single-file grouping and download status update interval.
 
 ### Troubleshooting
 

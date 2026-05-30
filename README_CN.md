@@ -98,6 +98,7 @@
 | `DOWNLOAD_TO_DIR` | 下载文件存储目录 | `./downloads/` |
 | `USER_ID` | 您的 Telegram 用户 ID | `1234567890` |
 | `CHAT_ID` | 机器人操作的聊天 ID | `1234567890` |
+| `APP_SETTINGS_FILE` | 运行时设置 JSON 路径 | `./data/settings.json` |
 | `SINGLE_FILE_GROUP_ENABLED` | 启动时是否启用单文件连续转发聚合 | `false` |
 | `SINGLE_FILE_GROUP_DELAY` | 单文件聚合等待时间（秒） | `1.0` |
 | `DOWNLOAD_STATUS_UPDATE_INTERVAL` | 下载状态更新间隔（秒，最小 3.0） | `5.0` |
@@ -148,6 +149,8 @@
 5. **统计**: 完成后显示下载成功/失败数量
 
 开启 `/single_group` 后，不带 `media_group_id` 的连续单文件消息会按同一聊天聚合：收到单文件后等待配置的秒数，期间每收到一个新的单文件都会重置计时器；计时结束后复用媒体组的确认、文件选择和批量下载流程。
+
+通过 bot 命令修改的运行时设置会持久化到 `data/settings.json`。Compose 文件会将同目录的 `./data` 映射到容器内 `/app/data`；如果 JSON 文件存在，它会覆盖环境变量中的可保存设置默认值，例如单文件聚合和下载状态更新间隔。
 
 ### 故障排除
 

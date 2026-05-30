@@ -46,6 +46,7 @@ class SingleFileGroupingTests(unittest.IsolatedAsyncioTestCase):
         downloader._pending_single_file_groups.clear()
         downloader._single_file_grouping_enabled = False
         downloader._single_file_grouping_delay = 1.0
+        downloader._download_status_update_interval = 5.0
 
         for timer in timers:
             timer.cancel()
@@ -102,6 +103,36 @@ class SingleFileGroupingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(downloader._pending_single_file_groups, {})
         self.assertEqual(downloader._single_file_group_timers, {})
+
+    async def test_single_group_command_persists_runtime_settings(self):
+        saved_settings = []
+
+        def fake_save_runtime_settings(settings):
+            saved_settings.append(settings)
+
+        original_save_runtime_settings = downloader.save_runtime_settings
+        downloader.save_runtime_settings = fake_save_runtime_settings
+        message = SimpleNamespace(replies=[])
+
+        async def reply_text(text, parse_mode=None):
+            message.replies.append({"text": text, "parse_mode": parse_mode})
+
+        message.reply_text = reply_text
+        update = SimpleNamespace(message=message)
+        context = SimpleNamespace(args=["on", "2.5"])
+
+        try:
+            await downloader.single_group.callback.__wrapped__(update, context)
+        finally:
+            downloader.save_runtime_settings = original_save_runtime_settings
+
+        self.assertTrue(downloader._single_file_grouping_enabled)
+        self.assertEqual(downloader._single_file_grouping_delay, 2.5)
+        self.assertEqual(len(saved_settings), 1)
+        self.assertTrue(saved_settings[0].single_file_group_enabled)
+        self.assertEqual(saved_settings[0].single_file_group_delay, 2.5)
+        self.assertEqual(saved_settings[0].download_status_update_interval, 5.0)
+        self.assertIn("Single-file grouping is ON", message.replies[0]["text"])
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     DOWNLOAD_TO_DIR: str
     USER_ID: str
     CHAT_ID: str
+    APP_SETTINGS_FILE: str = "./data/settings.json"
     SINGLE_FILE_GROUP_ENABLED: bool = False
     SINGLE_FILE_GROUP_DELAY: float = 1.0
     DOWNLOAD_STATUS_UPDATE_INTERVAL: float = 5.0

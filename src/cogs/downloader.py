@@ -24,7 +24,15 @@ from ..middlewares.handlers import (
     message_handler,
 )
 from ..models import DownloadFile, downloading_files
-from ..utils import cancel_file_download, check_file_exists, env, get_file
+from ..utils import (
+    RuntimeSettings,
+    cancel_file_download,
+    check_file_exists,
+    env,
+    get_file,
+    runtime_settings,
+    save_runtime_settings,
+)
 from ..utils.media_group import get_media_info, process_media_group
 
 logger = logging.getLogger(__name__)
@@ -82,14 +90,33 @@ def _clamp_download_status_update_interval(interval: float) -> float:
     )
 
 
-_single_file_grouping_enabled = env.SINGLE_FILE_GROUP_ENABLED
-_single_file_grouping_delay = _clamp_single_file_group_delay(env.SINGLE_FILE_GROUP_DELAY)
+_single_file_grouping_enabled = runtime_settings.single_file_group_enabled
+_single_file_grouping_delay = _clamp_single_file_group_delay(
+    runtime_settings.single_file_group_delay
+)
 _download_status_update_interval = _clamp_download_status_update_interval(
-    env.DOWNLOAD_STATUS_UPDATE_INTERVAL
+    runtime_settings.download_status_update_interval
 )
 _pending_single_file_groups: dict[str, List[Message]] = {}
 _single_file_group_timers: dict[str, asyncio.Task] = {}
 _single_file_group_lock = asyncio.Lock()
+
+
+def _build_current_runtime_settings() -> RuntimeSettings:
+    return RuntimeSettings(
+        single_file_group_enabled=_single_file_grouping_enabled,
+        single_file_group_delay=_single_file_grouping_delay,
+        download_status_update_interval=_download_status_update_interval,
+    )
+
+
+def _save_current_runtime_settings() -> bool:
+    try:
+        save_runtime_settings(_build_current_runtime_settings())
+    except Exception as error:
+        logger.warning("Failed to save runtime settings: %s", error)
+        return False
+    return True
 
 
 def _remove_download_cancel_token(file_id: str) -> None:
@@ -518,8 +545,11 @@ async def single_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             delay_arg = args[1]
     elif command in {"off", "disable", "disabled"}:
         _single_file_grouping_enabled = False
+        saved = _save_current_runtime_settings()
         flushed = await _flush_pending_single_file_groups(context)
         suffix = f"\nFlushed {flushed} pending file(s)." if flushed else ""
+        if not saved:
+            suffix += "\nWarning: runtime settings were not saved."
         await update.message.reply_text(f"Single-file grouping is OFF.{suffix}")
         return
     else:
@@ -538,8 +568,9 @@ async def single_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if enable_after_parse:
         _single_file_grouping_enabled = True
 
+    suffix = "" if _save_current_runtime_settings() else "\nWarning: runtime settings were not saved."
     await update.message.reply_text(
-        f"Single-file grouping is ON.\nDelay: {_single_file_grouping_delay:.2f}s"
+        f"Single-file grouping is ON.\nDelay: {_single_file_grouping_delay:.2f}s{suffix}"
     )
 
 

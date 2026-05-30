@@ -164,6 +164,7 @@ cython_debug/
 
 # Custom
 testing/
+data/
 bot-api/
 downloads/
 *.session

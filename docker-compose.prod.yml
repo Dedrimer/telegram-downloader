@@ -30,12 +30,14 @@ services:
             BOT_TOKEN: "${BOT_TOKEN}"
             USER_ID: "${USER_ID}"
             CHAT_ID: "${CHAT_ID}"
+            APP_SETTINGS_FILE: "/app/data/settings.json"
             SINGLE_FILE_GROUP_ENABLED: "${SINGLE_FILE_GROUP_ENABLED:-False}"
             SINGLE_FILE_GROUP_DELAY: "${SINGLE_FILE_GROUP_DELAY:-1.0}"
             DOWNLOAD_STATUS_UPDATE_INTERVAL: "${DOWNLOAD_STATUS_UPDATE_INTERVAL:-5.0}"
         volumes:
             - ${DOWNLOAD_TO_DIR}:/app/downloads
             - ${BOT_API_DIR}:/var/lib/telegram-bot-api
+            - ./data:/app/data
         depends_on:
             - telegram-bot-api
         restart: unless-stopped
