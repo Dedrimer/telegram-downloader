@@ -102,7 +102,7 @@ Create a `.env` file with the following variables:
 | `SINGLE_FILE_GROUP_ENABLED` | Enable consecutive single-file grouping at startup | `false` |
 | `SINGLE_FILE_GROUP_DELAY` | Single-file grouping wait time in seconds | `1.0` |
 | `DOWNLOAD_STATUS_UPDATE_INTERVAL` | Download status update interval in seconds (minimum 3.0) | `5.0` |
-| `MAX_CONCURRENT_DOWNLOADS` | Maximum number of Bot API file downloads running at the same time | `1` |
+| `MAX_CONCURRENT_DOWNLOADS` | Bot API file download concurrency, capped at 1 for low-memory devices | `1` |
 | `TELEGRAM_API_ID` | Telegram API ID (for local API) | `12345678` |
 | `TELEGRAM_API_HASH` | Telegram API Hash (for local API) | `abcdef1234...` |
 | `TELEGRAM_LOCAL` | Enable local API mode | `true` |
@@ -123,13 +123,13 @@ The **Media Group** feature allows you to download multiple files from a single 
 1. **How it works**:
    - When you forward a media group (multiple files), the bot detects all files
    - Shows a single confirmation message listing all files
-   - Downloads all files at once when confirmed
+   - Downloads the selected files one by one when confirmed
 
 2. **Example**:
    - Forward a media group with 3 PDF files
    - Bot shows: "Are you sure you want to download 3 files?"
    - Lists all files with their sizes
-   - Click **Yes** to download all at once
+   - Click **Yes** to start the sequential batch
 
 3. **Special Commands**:
    - `/status`: Check current download status
@@ -146,7 +146,7 @@ The media group feature uses a timer-based approach to collect all files:
 1. **Detection**: When a message arrives with `media_group_id`, it's identified as part of a group
 2. **Collection**: A 0.5-second timer starts, collecting all files in the same group
 3. **Confirmation**: After the timer expires, shows a single confirmation with all files
-4. **Batch Download**: Downloads all files with individual progress tracking
+4. **Batch Download**: Downloads files sequentially with individual progress tracking
 5. **Statistics**: Shows download success/failure count after completion
 
 When `/single_group` is enabled, consecutive single-file messages without a `media_group_id` are collected per chat. Each new single-file message resets the timer; when no new file arrives before the delay expires, the bot reuses the media-group confirmation, file selection, and batch download flow.
@@ -198,7 +198,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 | Feature | Single File Download | Media Group Download |
 |---------|---------------------|----------------------|
 | Confirmation | Once per file | Once for all files |
-| Download Method | Sequential | Concurrent |
+| Download Method | Sequential | Sequential |
 | Progress Display | Single file progress | Overall progress |
 | Error Handling | Per-file independent | Per-file independent |
 | Use Case | Single file | Multiple files |
@@ -208,7 +208,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Python 3.11+**
 - **python-telegram-bot**: Telegram Bot API wrapper
 - **Docker**: Containerized deployment
-- **asyncio**: Async concurrent processing
+- **asyncio**: Async update and download orchestration
 
 ## 📝 Changelog
 

@@ -53,8 +53,8 @@ class DownloadProgressTests(unittest.TestCase):
 
     def test_max_concurrent_downloads_is_clamped(self):
         self.assertEqual(downloader._clamp_max_concurrent_downloads(0), 1)
-        self.assertEqual(downloader._clamp_max_concurrent_downloads(2), 2)
-        self.assertEqual(downloader._clamp_max_concurrent_downloads(100), 8)
+        self.assertEqual(downloader._clamp_max_concurrent_downloads(2), 1)
+        self.assertEqual(downloader._clamp_max_concurrent_downloads(100), 1)
 
     def test_progress_status_text_includes_detailed_fields(self):
         download_file = DownloadFile("file-id", "movie.mkv", 1024)
