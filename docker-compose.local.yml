@@ -8,9 +8,11 @@ services:
             additional_contexts:
                 telegram-bot-api-src: ../telegram-bot-api
             args:
+                TELEGRAM_BOT_API_VERSION: "${TELEGRAM_BOT_API_VERSION:-10.1.0}"
                 nproc: "${TELEGRAM_BOT_API_BUILD_JOBS:-2}"
-        image: telegram-bot-api:local
+        image: "telegram-bot-api:${TELEGRAM_BOT_API_VERSION:-10.1.0}"
         environment:
+            TELEGRAM_BOT_API_VERSION: "${TELEGRAM_BOT_API_VERSION:-10.1.0}"
             TELEGRAM_API_ID: "${TELEGRAM_API_ID}"
             TELEGRAM_API_HASH: "${TELEGRAM_API_HASH}"
             TELEGRAM_LOCAL: "${TELEGRAM_LOCAL}"
@@ -22,6 +24,10 @@ services:
         build:
             context: .
             dockerfile: Dockerfile
+            args:
+                TELEGRAM_DOWNLOADER_VERSION: "${TELEGRAM_DOWNLOADER_VERSION:-0.2.0}"
+                TELEGRAM_BOT_API_VERSION: "${TELEGRAM_BOT_API_VERSION:-10.1.0}"
+        image: "telegram-downloader:${TELEGRAM_DOWNLOADER_VERSION:-0.2.0}"
         environment:
             LOCAL_BOT_API_URL: "http://telegram-bot-api:8081"
             BOT_API_DIR: "/var/lib/telegram-bot-api/"
@@ -29,6 +35,8 @@ services:
             BOT_TOKEN: "${BOT_TOKEN}"
             USER_ID: "${USER_ID}"
             CHAT_ID: "${CHAT_ID}"
+            TELEGRAM_DOWNLOADER_VERSION: "${TELEGRAM_DOWNLOADER_VERSION:-0.2.0}"
+            TELEGRAM_BOT_API_VERSION: "${TELEGRAM_BOT_API_VERSION:-10.1.0}"
             APP_SETTINGS_FILE: "/app/data/settings.json"
             SINGLE_FILE_GROUP_ENABLED: "${SINGLE_FILE_GROUP_ENABLED:-False}"
             SINGLE_FILE_GROUP_DELAY: "${SINGLE_FILE_GROUP_DELAY:-1.0}"

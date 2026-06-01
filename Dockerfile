@@ -25,5 +25,12 @@ ADD . /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
+ARG TELEGRAM_DOWNLOADER_VERSION=0.2.0
+ARG TELEGRAM_BOT_API_VERSION=10.1.0
+ENV TELEGRAM_DOWNLOADER_VERSION=${TELEGRAM_DOWNLOADER_VERSION} \
+    TELEGRAM_BOT_API_VERSION=${TELEGRAM_BOT_API_VERSION}
+LABEL org.opencontainers.image.title="telegram-downloader" \
+      org.opencontainers.image.version=${TELEGRAM_DOWNLOADER_VERSION}
+
 # Start the bot
 CMD ["uv", "run", "python", "run.py"]

@@ -9,9 +9,11 @@ services:
             additional_contexts:
                 telegram-bot-api-src: ../telegram-bot-api
             args:
+                TELEGRAM_BOT_API_VERSION: "${TELEGRAM_BOT_API_VERSION:-10.1.0}"
                 nproc: "${TELEGRAM_BOT_API_BUILD_JOBS:-2}"
-        image: telegram-bot-api:local
+        image: "telegram-bot-api:${TELEGRAM_BOT_API_VERSION:-10.1.0}"
         environment:
+            TELEGRAM_BOT_API_VERSION: "${TELEGRAM_BOT_API_VERSION:-10.1.0}"
             TELEGRAM_API_ID: "${TELEGRAM_API_ID}"
             TELEGRAM_API_HASH: "${TELEGRAM_API_HASH}"
             TELEGRAM_LOCAL: "${TELEGRAM_LOCAL}"

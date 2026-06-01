@@ -8,6 +8,7 @@ from telegram.ext import ContextTypes
 
 from ..middlewares.handlers import command_handler
 from ..utils import env
+from ..version import RuntimeInfo, get_runtime_info
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ DOWNLOAD_TO_DIR = env.DOWNLOAD_TO_DIR
 commands = {
     "/start": "Start the bot",
     "/help": "Get help",
-    "/info": "Get user and chat info",
+    "/info": "Get user, chat, and container version info",
     "/storage": "Get available storage information",
     "/status": "Get downloading files status",
     "/single_group": "Group consecutive single-file messages into one batch",
@@ -35,6 +36,24 @@ def _build_help_message() -> str:
         f"{commands_list}\n\n"
         "Send me a file and I'll download it to "
         f"<code>{html.escape(DOWNLOAD_TO_DIR)}</code>."
+    )
+
+
+def _build_info_message(user_id: int, chat_id: int, runtime_info: RuntimeInfo) -> str:
+    bot_api_source = {
+        "api": "reported by Bot API",
+        "configured": "configured fallback",
+    }.get(runtime_info.bot_api_version_source, runtime_info.bot_api_version_source)
+
+    return (
+        f"<b>User ID</b>: <code>{html.escape(str(user_id))}</code>\n"
+        f"<b>Chat ID</b>: <code>{html.escape(str(chat_id))}</code>\n\n"
+        "<b>Container Versions</b>\n"
+        "<code>telegram-downloader</code>: "
+        f"<code>{html.escape(runtime_info.downloader_version)}</code>\n"
+        "<code>telegram-bot-api</code>: "
+        f"<code>{html.escape(runtime_info.bot_api_version)}</code> "
+        f"({html.escape(bot_api_source)})"
     )
 
 
@@ -60,11 +79,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 @command_handler("info")
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send user and chat IDs to the user."""
+    """Send user, chat, and runtime version information to the user."""
     user = update.effective_user
+    runtime_info = await get_runtime_info()
     await update.message.reply_text(
-        f"*User ID*: {user.id}\n*Chat ID*: {update.effective_chat.id}",
-        parse_mode="markdown",
+        _build_info_message(user.id, update.effective_chat.id, runtime_info),
+        parse_mode="HTML",
     )
 
 
