@@ -67,6 +67,13 @@ class DownloadProgressTests(unittest.TestCase):
         self.assertIn("*Speed:*", text)
         self.assertIn("*ETA:*", text)
 
+    def test_progress_status_text_includes_batch_progress(self):
+        download_file = DownloadFile("file-id", "movie.mkv", 1024)
+
+        text = downloader._build_download_status_text(download_file, (2, 5))
+
+        self.assertIn("*Downloaded files:* `2/5`", text)
+
     def test_queued_download_status_is_visible(self):
         download_file = DownloadFile("file-id", "movie.mkv", 1024)
         download_file.mark_queued()

@@ -232,13 +232,23 @@ def escape_md2(text: str) -> str:
     # 这里的列表是 Telegram 所有需要转义的特殊字符
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\])', r'\\\1', text)
 
-def _build_download_status_text(download_file: DownloadFile) -> str:
+def _build_download_status_text(
+    download_file: DownloadFile,
+    batch_progress: Optional[Tuple[int, int]] = None,
+) -> str:
     title = "*Queued file...*" if download_file.queued else "*Downloading file...*"
+    batch_line = ""
+    if batch_progress:
+        completed_files, total_files = batch_progress
+        batch_line = (
+            f"> *Downloaded files:* `{completed_files}/{total_files}`\n"
+        )
     return (
         f"{title}\n\n"
         f"> *File:* `{escape_md(download_file.file_name)}`\n"
         f"> *Size:* `{escape_md(download_file.file_size_mb)}`\n"
         f"> *Status:* `{escape_md(download_file.status)}`\n"
+        f"{batch_line}"
         f"> *Downloaded:* `{escape_md(download_file.downloaded_size)}`\n"
         f"> *Progress:* `{escape_md(download_file.download_progress)}`\n"
         f"> *Speed:* `{escape_md(download_file.download_speed)}`\n"
@@ -820,6 +830,7 @@ async def _monitor_download_progress(
     status_message: Message,
     fallback_message: Message,
     reply_markup,
+    batch_progress: Optional[Tuple[int, int]] = None,
 ) -> None:
     if not status_message:
         return
@@ -854,7 +865,7 @@ async def _monitor_download_progress(
             await _try_update_progress_status(
                 status_message,
                 fallback_message,
-                _build_download_status_text(download_file),
+                _build_download_status_text(download_file, batch_progress),
                 reply_markup=reply_markup,
             )
     except asyncio.CancelledError:
@@ -868,6 +879,8 @@ async def _download_single_file(
     message: Message,
     context: ContextTypes.DEFAULT_TYPE,
     status_message: Message = None,
+    batch_progress: Optional[Tuple[int, int]] = None,
+    suppress_success_status: bool = False,
 ) -> bool:
     """
     下载单个文件
@@ -901,7 +914,7 @@ async def _download_single_file(
         await _update_download_status(
             status_message,
             message,
-            _build_download_status_text(download_file),
+            _build_download_status_text(download_file, batch_progress),
             parse_mode="Markdown",
             reply_markup=cancel_reply_markup,
         )
@@ -923,7 +936,7 @@ async def _download_single_file(
         await _update_download_status(
             status_message,
             message,
-            _build_download_status_text(download_file),
+            _build_download_status_text(download_file, batch_progress),
             parse_mode="Markdown",
             reply_markup=cancel_reply_markup,
         )
@@ -936,6 +949,7 @@ async def _download_single_file(
                 status_message,
                 message,
                 cancel_reply_markup,
+                batch_progress,
             )
         )
         new_file = await get_file(context.bot, download_file)
@@ -1107,12 +1121,13 @@ async def _download_single_file(
         f"> 💾 *Size:* `{escape_md(download_file.file_size_mb)}`\n"
         f"> ⏱ *Total Duration:* `{escape_md(download_file.total_duration)}`"
     )
-    await _update_download_status(
-        status_message,
-        message,
-        response_message,
-        parse_mode="Markdown",
-    )
+    if not suppress_success_status:
+        await _update_download_status(
+            status_message,
+            message,
+            response_message,
+            parse_mode="Markdown",
+        )
     release_download_slot()
     return True
 
@@ -1456,7 +1471,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 parse_mode="Markdown",
             )
             success = await _download_single_file(
-                file_id, file_name, file_size, message, group_context, status_message=query.message
+                file_id,
+                file_name,
+                file_size,
+                message,
+                group_context,
+                status_message=query.message,
+                batch_progress=(success_count, len(files_info)),
+                suppress_success_status=True,
             )
             if success:
                 success_count += 1
@@ -1597,7 +1619,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 parse_mode="Markdown",
             )
             success = await _download_single_file(
-                file_id, file_name, file_size, message, group_context, status_message=query.message
+                file_id,
+                file_name,
+                file_size,
+                message,
+                group_context,
+                status_message=query.message,
+                batch_progress=(success_count, len(selected_files)),
+                suppress_success_status=True,
             )
             if success:
                 success_count += 1
@@ -1713,7 +1742,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     parse_mode="Markdown",
                 )
                 success = await _download_single_file(
-                    file_id, file_name, file_size, message, retry_context, status_message=query.message
+                    file_id,
+                    file_name,
+                    file_size,
+                    message,
+                    retry_context,
+                    status_message=query.message,
+                    batch_progress=(success_count, len(failed_files)),
+                    suppress_success_status=True,
                 )
                 if success:
                     success_count += 1
