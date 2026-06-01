@@ -2,6 +2,7 @@ from .env import env as env
 from .get_file import cancel_file_download as cancel_file_download
 from .get_file import check_file_exists as check_file_exists
 from .get_file import get_file as get_file
+from .get_file import get_file_download_progress as get_file_download_progress
 from .media_group import get_media_info as get_media_info
 from .media_group import process_media_group as process_media_group
 from .runtime_settings import RuntimeSettings as RuntimeSettings
@@ -14,6 +15,7 @@ __all__ = [
     "check_file_exists",
     "env",
     "get_file",
+    "get_file_download_progress",
     "get_media_info",
     "process_media_group",
     "RuntimeSettings",

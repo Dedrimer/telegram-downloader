@@ -7,7 +7,7 @@ import re
 import shutil
 import time
 import traceback
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from telegram import (
     InlineKeyboardButton,
@@ -30,6 +30,7 @@ from ..utils import (
     check_file_exists,
     env,
     get_file,
+    get_file_download_progress,
     runtime_settings,
     save_runtime_settings,
 )
@@ -119,6 +120,7 @@ _single_file_group_timers: dict[str, asyncio.Task] = {}
 _single_file_group_lock = asyncio.Lock()
 _progress_status_update_lock = asyncio.Lock()
 _progress_status_last_update_at = 0.0
+_bot_api_progress_endpoint_supported: Optional[bool] = None
 
 
 def _build_current_runtime_settings() -> RuntimeSettings:
@@ -251,6 +253,63 @@ def _get_bot_api_progress_root() -> str:
     if os.path.isdir(token_root):
         return token_root
     return BOT_API_DIR
+
+
+def _coerce_progress_bytes(value: Any) -> Optional[int]:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_bot_api_progress_size(
+    progress: dict[str, Any],
+    download_file: DownloadFile,
+) -> Optional[int]:
+    downloaded_bytes = _coerce_progress_bytes(progress.get("downloaded_size"))
+    if downloaded_bytes is None:
+        return None
+
+    if progress.get("is_downloading_completed"):
+        expected_size = _coerce_progress_bytes(progress.get("expected_size"))
+        file_size = _coerce_progress_bytes(progress.get("file_size"))
+        downloaded_bytes = max(downloaded_bytes, expected_size or 0, file_size or 0)
+
+    if download_file.file_size > 0:
+        downloaded_bytes = min(downloaded_bytes, download_file.file_size)
+    return downloaded_bytes
+
+
+def _is_bot_api_progress_endpoint_unsupported(error: BaseException) -> bool:
+    message = str(error).lower()
+    return (
+        message.startswith("not found")
+        or "method not found" in message
+        or ("not found" in message and "method" in message)
+        or "unsupported" in message
+    )
+
+
+async def _get_bot_api_progress_size(download_file: DownloadFile) -> Optional[int]:
+    global _bot_api_progress_endpoint_supported
+
+    if _bot_api_progress_endpoint_supported is False:
+        return None
+
+    try:
+        progress = await get_file_download_progress(download_file.file_id)
+    except Exception as error:
+        if _is_bot_api_progress_endpoint_unsupported(error):
+            _bot_api_progress_endpoint_supported = False
+            logger.info(
+                "Bot API getFileDownloadProgress is not available; using filesystem progress fallback"
+            )
+        else:
+            logger.debug("Failed to read Bot API download progress: %s", error)
+        return None
+
+    _bot_api_progress_endpoint_supported = True
+    return _extract_bot_api_progress_size(progress, download_file)
 
 
 def _find_download_progress_size(
@@ -773,12 +832,17 @@ async def _monitor_download_progress(
         while True:
             await asyncio.sleep(_DOWNLOAD_PROGRESS_POLL_INTERVAL)
 
-            progress_size, progress_path = await asyncio.to_thread(
-                _find_download_progress_size,
-                download_file,
-                started_at,
-                progress_path,
-            )
+            progress_size = await _get_bot_api_progress_size(download_file)
+            if (
+                progress_size is None
+                and _bot_api_progress_endpoint_supported is False
+            ):
+                progress_size, progress_path = await asyncio.to_thread(
+                    _find_download_progress_size,
+                    download_file,
+                    started_at,
+                    progress_path,
+                )
             if progress_size is not None:
                 download_file.update_progress(progress_size)
 

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -23,6 +24,7 @@ MAX_RETRY_DELAY = 60  # 最大重试延迟时间（秒）
 # Environment variables
 DOWNLOAD_TO_DIR = env.DOWNLOAD_TO_DIR
 CANCEL_FILE_DOWNLOAD_TIMEOUT = 10
+GET_FILE_DOWNLOAD_PROGRESS_TIMEOUT = 10
 CANCELLED_FILE_DOWNLOAD_TEXT = "file download was cancelled"
 
 
@@ -30,14 +32,14 @@ def is_cancelled_file_download_error(error: BaseException) -> bool:
     return CANCELLED_FILE_DOWNLOAD_TEXT in str(error).lower()
 
 
-def _cancel_file_download_sync(file_id: str) -> bool:
+def _post_bot_api_form(method: str, data: dict[str, str], timeout: int) -> Any:
     url = (
         f"{env.LOCAL_BOT_API_URL.rstrip('/')}"
-        f"/bot{env.BOT_TOKEN}/cancelFileDownload"
+        f"/bot{env.BOT_TOKEN}/{method}"
     )
     request = Request(
         url,
-        data=urlencode({"file_id": file_id}).encode("utf-8"),
+        data=urlencode(data).encode("utf-8"),
         method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
@@ -56,12 +58,33 @@ def _cancel_file_download_sync(file_id: str) -> bool:
     except URLError as error:
         raise NetworkError(str(error)) from error
     except json.JSONDecodeError as error:
-        raise TelegramError("Invalid cancelFileDownload response") from error
+        raise TelegramError(f"Invalid {method} response") from error
 
     if not payload.get("ok"):
-        raise TelegramError(payload.get("description", "cancelFileDownload failed"))
+        raise TelegramError(payload.get("description", f"{method} failed"))
 
-    return bool(payload.get("result"))
+    return payload.get("result")
+
+
+def _cancel_file_download_sync(file_id: str) -> bool:
+    return bool(
+        _post_bot_api_form(
+            "cancelFileDownload",
+            {"file_id": file_id},
+            CANCEL_FILE_DOWNLOAD_TIMEOUT,
+        )
+    )
+
+
+def _get_file_download_progress_sync(file_id: str) -> dict[str, Any]:
+    result = _post_bot_api_form(
+        "getFileDownloadProgress",
+        {"file_id": file_id},
+        GET_FILE_DOWNLOAD_PROGRESS_TIMEOUT,
+    )
+    if not isinstance(result, dict):
+        raise TelegramError("Invalid getFileDownloadProgress result")
+    return result
 
 
 async def cancel_file_download(file_id: str) -> bool:
@@ -69,6 +92,13 @@ async def cancel_file_download(file_id: str) -> bool:
     Ask the local Telegram Bot API server to cancel an in-progress getFile download.
     """
     return await asyncio.to_thread(_cancel_file_download_sync, file_id)
+
+
+async def get_file_download_progress(file_id: str) -> dict[str, Any]:
+    """
+    Ask the local Telegram Bot API server for the current getFile download progress.
+    """
+    return await asyncio.to_thread(_get_file_download_progress_sync, file_id)
 
 
 async def get_file(bot: Bot, file: DownloadFile) -> File:

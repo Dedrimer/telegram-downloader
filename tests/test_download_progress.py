@@ -114,6 +114,55 @@ class DownloadProgressTests(unittest.TestCase):
                 downloader.BOT_API_DIR = old_bot_api_dir
                 downloader.TOKEN_SUB_DIR = old_token_sub_dir
 
+    def test_extract_bot_api_progress_size_is_bounded_by_file_size(self):
+        download_file = DownloadFile("file-id", "movie.mkv", 1024)
+
+        size = downloader._extract_bot_api_progress_size(
+            {"downloaded_size": 2048},
+            download_file,
+        )
+
+        self.assertEqual(size, 1024)
+
+
+class BotApiDownloadProgressTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.old_get_file_download_progress = downloader.get_file_download_progress
+        self.old_endpoint_supported = downloader._bot_api_progress_endpoint_supported
+        downloader._bot_api_progress_endpoint_supported = None
+
+    async def asyncTearDown(self):
+        downloader.get_file_download_progress = self.old_get_file_download_progress
+        downloader._bot_api_progress_endpoint_supported = self.old_endpoint_supported
+
+    async def test_bot_api_progress_size_reads_download_event(self):
+        async def fake_get_file_download_progress(file_id):
+            self.assertEqual(file_id, "file-id")
+            return {
+                "downloaded_size": 512,
+                "is_downloading_active": True,
+            }
+
+        downloader.get_file_download_progress = fake_get_file_download_progress
+        download_file = DownloadFile("file-id", "movie.mkv", 1024)
+
+        size = await downloader._get_bot_api_progress_size(download_file)
+
+        self.assertEqual(size, 512)
+        self.assertTrue(downloader._bot_api_progress_endpoint_supported)
+
+    async def test_bot_api_progress_size_disables_unsupported_endpoint(self):
+        async def fake_get_file_download_progress(file_id):
+            raise RuntimeError("Not Found: method not found")
+
+        downloader.get_file_download_progress = fake_get_file_download_progress
+        download_file = DownloadFile("file-id", "movie.mkv", 1024)
+
+        size = await downloader._get_bot_api_progress_size(download_file)
+
+        self.assertIsNone(size)
+        self.assertFalse(downloader._bot_api_progress_endpoint_supported)
+
 
 class FakeStatusMessage:
     def __init__(self, error=None):
