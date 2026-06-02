@@ -1,6 +1,8 @@
-ARG ALPINE_VERSION=3.21
-ARG PYTHON_VERSION=3.11
-FROM python:${PYTHON_VERSION}-alpine${ALPINE_VERSION} AS build
+# Use an official Python runtime as a parent image
+FROM python:3.11.9-bookworm
+
+# Install necessary packages
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates
 
 # Install uv via pip to avoid GitHub release download issues
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
@@ -10,8 +12,7 @@ RUN python -m pip install --no-cache-dir -i ${PIP_INDEX_URL} uv==0.5.9
 WORKDIR /app
 
 # Enable bytecode compilation
-ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy
+ENV UV_COMPILE_BYTECODE=1
 
 # Install the project's dependencies using the lockfile and settings
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -24,20 +25,12 @@ ADD . /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
-FROM python:${PYTHON_VERSION}-alpine${ALPINE_VERSION}
-
-RUN apk add --no-cache --update ca-certificates
-WORKDIR /app
-
-COPY --from=build /app /app
-
 ARG TELEGRAM_DOWNLOADER_VERSION=0.2.1
 ARG TELEGRAM_BOT_API_VERSION=10.1.0
 ENV TELEGRAM_DOWNLOADER_VERSION=${TELEGRAM_DOWNLOADER_VERSION} \
-    TELEGRAM_BOT_API_VERSION=${TELEGRAM_BOT_API_VERSION} \
-    PATH="/app/.venv/bin:${PATH}"
+    TELEGRAM_BOT_API_VERSION=${TELEGRAM_BOT_API_VERSION}
 LABEL org.opencontainers.image.title="telegram-downloader" \
       org.opencontainers.image.version=${TELEGRAM_DOWNLOADER_VERSION}
 
 # Start the bot
-CMD ["python", "run.py"]
+CMD ["uv", "run", "python", "run.py"]

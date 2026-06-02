@@ -8,7 +8,7 @@ from importlib.metadata import version as package_version
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 BOT_API_VERSION = "10.1.0"
 BOT_API_VERSION_METHOD = "getBotApiVersion"
 BOT_API_VERSION_TIMEOUT = 3.0

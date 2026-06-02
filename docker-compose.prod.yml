@@ -25,9 +25,9 @@ services:
             context: https://github.com/Dedrimer/telegram-downloader.git#main
             dockerfile: Dockerfile
             args:
-                TELEGRAM_DOWNLOADER_VERSION: "${TELEGRAM_DOWNLOADER_VERSION:-0.2.0}"
+                TELEGRAM_DOWNLOADER_VERSION: "${TELEGRAM_DOWNLOADER_VERSION:-0.2.1}"
                 TELEGRAM_BOT_API_VERSION: "${TELEGRAM_BOT_API_VERSION:-10.1.0}"
-        image: "telegram-downloader:${TELEGRAM_DOWNLOADER_VERSION:-0.2.0}"
+        image: "telegram-downloader:${TELEGRAM_DOWNLOADER_VERSION:-0.2.1}"
         environment:
             LOCAL_BOT_API_URL: "http://telegram-bot-api:8081"
             BOT_API_DIR: "/var/lib/telegram-bot-api/"
@@ -35,7 +35,7 @@ services:
             BOT_TOKEN: "${BOT_TOKEN}"
             USER_ID: "${USER_ID}"
             CHAT_ID: "${CHAT_ID}"
-            TELEGRAM_DOWNLOADER_VERSION: "${TELEGRAM_DOWNLOADER_VERSION:-0.2.0}"
+            TELEGRAM_DOWNLOADER_VERSION: "${TELEGRAM_DOWNLOADER_VERSION:-0.2.1}"
             TELEGRAM_BOT_API_VERSION: "${TELEGRAM_BOT_API_VERSION:-10.1.0}"
             APP_SETTINGS_FILE: "/app/data/settings.json"
             SINGLE_FILE_GROUP_ENABLED: "${SINGLE_FILE_GROUP_ENABLED:-False}"

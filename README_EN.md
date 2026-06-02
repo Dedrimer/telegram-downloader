@@ -101,7 +101,7 @@ Create a `.env` file with the following variables:
 | `SINGLE_FILE_GROUP_DELAY` | Single-file grouping wait time in seconds | `1.0` |
 | `DOWNLOAD_STATUS_UPDATE_INTERVAL` | Download status update interval in seconds (minimum 3.0) | `5.0` |
 | `MAX_CONCURRENT_DOWNLOADS` | Bot API file download concurrency, capped at 1 for low-memory devices | `1` |
-| `TELEGRAM_DOWNLOADER_VERSION` | Downloader container version reported by `/info` | `0.2.0` |
+| `TELEGRAM_DOWNLOADER_VERSION` | Downloader container version reported by `/info` | `0.2.1` |
 | `TELEGRAM_BOT_API_VERSION` | Bot API container version fallback reported by `/info` | `10.1.0` |
 | `TELEGRAM_API_ID` | Telegram API ID (for local API) | `12345678` |
 | `TELEGRAM_API_HASH` | Telegram API Hash (for local API) | `abcdef1234...` |

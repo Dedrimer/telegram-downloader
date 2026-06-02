@@ -48,7 +48,7 @@ class GeneralHelpTests(unittest.IsolatedAsyncioTestCase):
             message=message,
         )
         runtime_info = version.RuntimeInfo(
-            downloader_version="0.2.0",
+            downloader_version="0.2.1",
             bot_api_version="10.1.0",
             bot_api_version_source="api",
         )
@@ -64,7 +64,7 @@ class GeneralHelpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<b>User ID</b>: <code>42</code>", reply["text"])
         self.assertIn("<b>Chat ID</b>: <code>-100</code>", reply["text"])
         self.assertIn(
-            "<code>telegram-downloader</code>: <code>0.2.0</code>", reply["text"]
+            "<code>telegram-downloader</code>: <code>0.2.1</code>", reply["text"]
         )
         self.assertIn(
             "<code>telegram-bot-api</code>: <code>10.1.0</code>", reply["text"]
