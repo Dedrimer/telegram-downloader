@@ -31,13 +31,8 @@ WORKDIR /app
 
 COPY --from=build /app /app
 
-ARG TELEGRAM_DOWNLOADER_VERSION=0.2.1
-ARG TELEGRAM_BOT_API_VERSION=10.1.0
-ENV TELEGRAM_DOWNLOADER_VERSION=${TELEGRAM_DOWNLOADER_VERSION} \
-    TELEGRAM_BOT_API_VERSION=${TELEGRAM_BOT_API_VERSION} \
-    PATH="/app/.venv/bin:${PATH}"
-LABEL org.opencontainers.image.title="telegram-downloader" \
-      org.opencontainers.image.version=${TELEGRAM_DOWNLOADER_VERSION}
+ENV PATH="/app/.venv/bin:${PATH}"
+LABEL org.opencontainers.image.title="telegram-downloader"
 
 # Start the bot
 CMD ["python", "run.py"]

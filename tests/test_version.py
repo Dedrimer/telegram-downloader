@@ -15,7 +15,7 @@ class VersionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, ("10.1.0", "api"))
 
-    async def test_get_bot_api_version_falls_back_to_configured_version(self):
+    async def test_get_bot_api_version_is_unknown_when_unavailable(self):
         with patch.dict(os.environ, {"TELEGRAM_BOT_API_VERSION": "10.1.0"}):
             with patch.object(
                 version,
@@ -24,7 +24,12 @@ class VersionTests(unittest.IsolatedAsyncioTestCase):
             ):
                 result = await version.get_bot_api_version()
 
-        self.assertEqual(result, ("10.1.0", "configured"))
+        self.assertEqual(result, ("unknown", "unavailable"))
+
+    async def test_downloader_version_ignores_environment_override(self):
+        expected_version = version.VERSION_FILE.read_text(encoding="utf-8").strip()
+        with patch.dict(os.environ, {"TELEGRAM_DOWNLOADER_VERSION": "9.9.9"}):
+            self.assertEqual(version.get_downloader_version(), expected_version)
 
 
 if __name__ == "__main__":

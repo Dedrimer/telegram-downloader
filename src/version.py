@@ -1,17 +1,17 @@
 import asyncio
 import json
 import logging
-import os
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-APP_VERSION = "0.2.1"
-BOT_API_VERSION = "10.1.0"
 BOT_API_VERSION_METHOD = "getBotApiVersion"
 BOT_API_VERSION_TIMEOUT = 3.0
+UNKNOWN_VERSION = "unknown"
+VERSION_FILE = Path(__file__).resolve().parents[1] / "VERSION"
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +24,7 @@ class RuntimeInfo:
 
 
 def get_downloader_version() -> str:
-    return (
-        os.getenv("TELEGRAM_DOWNLOADER_VERSION")
-        or _get_installed_downloader_version()
-        or APP_VERSION
-    )
-
-
-def get_configured_bot_api_version() -> str:
-    return os.getenv("TELEGRAM_BOT_API_VERSION") or BOT_API_VERSION
+    return _get_source_downloader_version() or _get_installed_downloader_version() or UNKNOWN_VERSION
 
 
 async def get_runtime_info() -> RuntimeInfo:
@@ -54,7 +46,7 @@ async def get_bot_api_version() -> tuple[str, str]:
     if reported_version:
         return reported_version, "api"
 
-    return get_configured_bot_api_version(), "configured"
+    return UNKNOWN_VERSION, "unavailable"
 
 
 def _get_installed_downloader_version() -> str | None:
@@ -62,6 +54,14 @@ def _get_installed_downloader_version() -> str | None:
         return package_version("telegram-downloader")
     except PackageNotFoundError:
         return None
+
+
+def _get_source_downloader_version() -> str | None:
+    try:
+        version = VERSION_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return version or None
 
 
 def _request_bot_api_version_sync() -> str | None:

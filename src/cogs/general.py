@@ -42,7 +42,7 @@ def _build_help_message() -> str:
 def _build_info_message(user_id: int, chat_id: int, runtime_info: RuntimeInfo) -> str:
     bot_api_source = {
         "api": "reported by Bot API",
-        "configured": "configured fallback",
+        "unavailable": "unavailable",
     }.get(runtime_info.bot_api_version_source, runtime_info.bot_api_version_source)
 
     return (
