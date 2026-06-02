@@ -1,4 +1,6 @@
 import asyncio
+import errno
+import json
 import logging
 import math
 import os
@@ -83,6 +85,244 @@ _DOWNLOAD_STATUS_UPDATE_MAX_INTERVAL = 60.0
 _DOWNLOAD_CONCURRENCY_DEFAULT = 1
 _DOWNLOAD_CONCURRENCY_MIN = 1
 _DOWNLOAD_CONCURRENCY_MAX = 1
+_INTERACTION_STATE_OFFLOAD_AFTER = 60.0
+_MEDIA_GROUP_SESSION_TTL = 30 * 60
+_LOW_CACHE_COPY_BUFFER_SIZE = 1024 * 1024
+_INTERACTION_STATE_FILE = os.path.join(
+    os.path.dirname(env.APP_SETTINGS_FILE) or ".",
+    "interaction_state.json",
+)
+_INTERACTION_STATE_BUCKETS = {
+    "media_group_confirmations": _media_group_confirmations,
+    "media_group_failed_files": _media_group_failed_files,
+    "media_group_file_selections": _media_group_file_selections,
+    "status_cancel_selections": _status_cancel_selections,
+}
+
+
+def _monotonic_now() -> float:
+    return time.monotonic()
+
+
+def _drop_file_cache(file_obj, offset: int = 0, length: int = 0) -> None:
+    posix_fadvise = getattr(os, "posix_fadvise", None)
+    dontneed = getattr(os, "POSIX_FADV_DONTNEED", None)
+    if posix_fadvise is None or dontneed is None:
+        return
+    try:
+        file_obj.flush()
+    except OSError:
+        pass
+    try:
+        posix_fadvise(file_obj.fileno(), offset, length, dontneed)
+    except OSError:
+        pass
+
+
+def _copy_file_low_cache(source_path: str, target_path: str) -> None:
+    with open(source_path, "rb", buffering=0) as source, open(
+        target_path, "wb", buffering=0
+    ) as target:
+        buffer = bytearray(_LOW_CACHE_COPY_BUFFER_SIZE)
+        view = memoryview(buffer)
+        copied_since_drop = 0
+        total_copied = 0
+        while True:
+            read_size = source.readinto(buffer)
+            if not read_size:
+                break
+            target.write(view[:read_size])
+            total_copied += read_size
+            copied_since_drop += read_size
+            if copied_since_drop >= _LOW_CACHE_COPY_BUFFER_SIZE * 8:
+                offset = max(0, total_copied - copied_since_drop)
+                _drop_file_cache(source, offset, copied_since_drop)
+                _drop_file_cache(target, offset, copied_since_drop)
+                copied_since_drop = 0
+
+        if copied_since_drop:
+            offset = max(0, total_copied - copied_since_drop)
+            _drop_file_cache(source, offset, copied_since_drop)
+            _drop_file_cache(target, offset, copied_since_drop)
+
+
+def _move_file_low_cache(source_path: str, target_path: str) -> None:
+    try:
+        os.replace(source_path, target_path)
+        return
+    except OSError as error:
+        if error.errno != errno.EXDEV:
+            raise
+
+    try:
+        _copy_file_low_cache(source_path, target_path)
+    except Exception:
+        try:
+            os.unlink(target_path)
+        except FileNotFoundError:
+            pass
+        raise
+    try:
+        shutil.copystat(source_path, target_path)
+    except OSError as error:
+        logger.debug(
+            "Failed to copy file metadata from %s to %s: %s",
+            source_path,
+            target_path,
+            error,
+        )
+    os.unlink(source_path)
+
+
+def _load_interaction_state_file() -> dict[str, dict]:
+    if not os.path.exists(_INTERACTION_STATE_FILE):
+        return {}
+    try:
+        with open(_INTERACTION_STATE_FILE, encoding="utf-8") as state_file:
+            payload = json.load(state_file)
+    except (OSError, json.JSONDecodeError) as error:
+        logger.warning("Failed to load interaction state from %s: %s", _INTERACTION_STATE_FILE, error)
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        bucket: value
+        for bucket, value in payload.items()
+        if bucket in _INTERACTION_STATE_BUCKETS and isinstance(value, dict)
+    }
+
+
+def _save_interaction_state_file(state: dict[str, dict]) -> None:
+    state = {bucket: values for bucket, values in state.items() if values}
+    state_dir = os.path.dirname(_INTERACTION_STATE_FILE)
+    if state_dir:
+        os.makedirs(state_dir, exist_ok=True)
+
+    if not state:
+        try:
+            os.unlink(_INTERACTION_STATE_FILE)
+        except FileNotFoundError:
+            pass
+        return
+
+    temp_path = f"{_INTERACTION_STATE_FILE}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as state_file:
+        json.dump(state, state_file, ensure_ascii=False, indent=2, sort_keys=True)
+        state_file.write("\n")
+    os.replace(temp_path, _INTERACTION_STATE_FILE)
+
+
+def _is_interaction_state_expired(value: object, now: Optional[float] = None) -> bool:
+    now = now or _monotonic_now()
+    created_at = value.get("created_at") if isinstance(value, dict) else None
+    return created_at is not None and now - created_at > _MEDIA_GROUP_SESSION_TTL
+
+
+def _offload_interaction_state(bucket: str, key: str, value: dict) -> None:
+    state = _load_interaction_state_file()
+    state.setdefault(bucket, {})[key] = value
+    _save_interaction_state_file(state)
+
+
+def _get_interaction_state(bucket: str, key: str, pop: bool = False):
+    memory_bucket = _INTERACTION_STATE_BUCKETS[bucket]
+    if key in memory_bucket:
+        value = memory_bucket.pop(key) if pop else memory_bucket[key]
+        if isinstance(value, dict):
+            value["updated_at"] = _monotonic_now()
+        return value
+
+    state = _load_interaction_state_file()
+    disk_bucket = state.get(bucket, {})
+    value = disk_bucket.get(key)
+    if value is None:
+        return None
+
+    if _is_interaction_state_expired(value):
+        disk_bucket.pop(key, None)
+        _save_interaction_state_file(state)
+        return None
+
+    disk_bucket.pop(key, None)
+    _save_interaction_state_file(state)
+    if isinstance(value, dict):
+        value["updated_at"] = _monotonic_now()
+    if not pop:
+        memory_bucket[key] = value
+    return value
+
+
+def _set_interaction_state(bucket: str, key: str, value: dict) -> None:
+    now = _monotonic_now()
+    value.setdefault("created_at", now)
+    value["updated_at"] = now
+    _INTERACTION_STATE_BUCKETS[bucket][key] = value
+
+
+def _pop_interaction_state(bucket: str, key: str):
+    return _get_interaction_state(bucket, key, pop=True)
+
+
+def _prune_mapping_by_age(bucket: str, mapping: dict, now: Optional[float] = None) -> None:
+    now = now or _monotonic_now()
+    for key, value in list(mapping.items()):
+        if not isinstance(value, dict):
+            continue
+        created_at = value.get("created_at")
+        updated_at = value.get("updated_at", created_at)
+        if created_at is not None and now - created_at > _MEDIA_GROUP_SESSION_TTL:
+            mapping.pop(key, None)
+            continue
+        if updated_at is not None and now - updated_at > _INTERACTION_STATE_OFFLOAD_AFTER:
+            _offload_interaction_state(bucket, key, value)
+            mapping.pop(key, None)
+
+
+def _prune_stale_interaction_state() -> None:
+    now = _monotonic_now()
+    _prune_mapping_by_age("media_group_confirmations", _media_group_confirmations, now)
+    _prune_mapping_by_age("media_group_failed_files", _media_group_failed_files, now)
+    _prune_mapping_by_age("status_cancel_selections", _status_cancel_selections, now)
+
+    state = _load_interaction_state_file()
+    changed = False
+    for bucket, values in list(state.items()):
+        for key, value in list(values.items()):
+            if _is_interaction_state_expired(value, now):
+                values.pop(key, None)
+                changed = True
+    if changed:
+        _save_interaction_state_file(state)
+
+    for media_group_id in list(_media_group_file_selections):
+        if (
+            media_group_id not in _media_group_confirmations
+            and not _load_interaction_state_file().get("media_group_confirmations", {}).get(media_group_id)
+        ):
+            _media_group_file_selections.pop(media_group_id, None)
+
+
+def _build_file_state(info: Tuple[str, str, int], message: Message) -> dict[str, Any]:
+    file_id, file_name, file_size = info
+    return {
+        "file_id": file_id,
+        "file_name": file_name,
+        "file_size": int(file_size or 0),
+        "chat_id": getattr(message, "chat_id", None),
+        "message_id": getattr(message, "message_id", None),
+    }
+
+
+def _build_files_state(files_info: List[Tuple[Tuple[str, str, int], Message]]) -> list[dict[str, Any]]:
+    return [_build_file_state(info, message) for info, message in files_info]
+
+
+def _file_state_info(file_state: dict[str, Any]) -> tuple[str, str, int]:
+    return (
+        str(file_state["file_id"]),
+        str(file_state["file_name"]),
+        int(file_state.get("file_size") or 0),
+    )
 
 
 def _clamp_single_file_group_delay(delay: float) -> float:
@@ -175,7 +415,7 @@ def _build_status_cancel_keyboard(status_session_id: str, file_ids: List[str], s
     row = []
     active_file_ids = [file_id for file_id in file_ids if file_id in downloading_files]
     total_pages = math.ceil(len(active_file_ids) / 8) if active_file_ids else 1
-    page = int(_status_cancel_selections.get(status_session_id, {}).get('page', 0))
+    page = int((_get_interaction_state("status_cancel_selections", status_session_id) or {}).get('page', 0))
     page = max(0, min(page, total_pages - 1))
     start_idx = page * 8
     end_idx = start_idx + 8
@@ -381,17 +621,22 @@ def _find_download_progress_size(
 @command_handler("status")
 @auth_required
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _prune_stale_interaction_state()
     if not downloading_files:
         await update.message.reply_text("No files are being downloaded at the moment.")
         return
 
     files_items = list(downloading_files.items())
     status_session_id = str(update.effective_chat.id)
-    _status_cancel_selections[status_session_id] = {
-        'file_ids': [file_id for file_id, _ in files_items],
-        'selected': [False] * len(files_items),
-        'page': 0,
-    }
+    _set_interaction_state(
+        "status_cancel_selections",
+        status_session_id,
+        {
+            'file_ids': [file_id for file_id, _ in files_items],
+            'selected': [False] * len(files_items),
+            'page': 0,
+        },
+    )
 
     status_message = "*Downloading files status:*\n"
     for i, (file_id, file) in enumerate(files_items, start=1):
@@ -672,6 +917,7 @@ async def _handle_media_group_download(
     """
     处理媒体组的批量下载
     """
+    _prune_stale_interaction_state()
     if not files_info:
         return
     
@@ -700,10 +946,11 @@ async def _handle_media_group_download(
     media_group_id = media_group_id or first_message.media_group_id
     if not media_group_id:
         media_group_id = _build_single_file_group_id(first_message, files_info[-1][1])
-    _media_group_confirmations[media_group_id] = {
-        'files_info': files_info,
-        'context': context
-    }
+    _set_interaction_state(
+        "media_group_confirmations",
+        media_group_id,
+        {"files": _build_files_state(files_info)},
+    )
     
     await context.bot.send_message(
         chat_id=chat_id,
@@ -1076,8 +1323,7 @@ async def _download_single_file(
 
     try:
         os.makedirs(DOWNLOAD_TO_DIR, exist_ok=True)
-        # 🌟 shutil.move 会根据文件系统智能判断，能够跨文件系统移动
-        await asyncio.to_thread(shutil.move, target_api_file, move_to_path)
+        await asyncio.to_thread(_move_file_low_cache, target_api_file, move_to_path)
     except Exception as move_error:
         logger.error(f"Error MOVING file: {move_error}")
         try:
@@ -1140,18 +1386,22 @@ async def _show_file_selection(
     显示文件选择界面
     支持分页：每页最多 8 个文件按钮（避免 Telegram 消息按钮过多）
     """
-    if media_group_id not in _media_group_confirmations:
+    if not _get_interaction_state("media_group_confirmations", media_group_id):
         await query.edit_message_text("⚠️ Media group session expired.")
         return
     
-    media_group_info = _media_group_confirmations[media_group_id]
-    files_info = media_group_info['files_info']
+    media_group_info = _get_interaction_state("media_group_confirmations", media_group_id)
+    files_info = media_group_info["files"]
     
     # 初始化选择状态（默认全部选中）
     if media_group_id not in _media_group_file_selections:
-        _media_group_file_selections[media_group_id] = [True] * len(files_info)
+        _set_interaction_state(
+            "media_group_file_selections",
+            media_group_id,
+            {"selected": [True] * len(files_info)},
+        )
     
-    selections = _media_group_file_selections[media_group_id]
+    selections = _get_interaction_state("media_group_file_selections", media_group_id)["selected"]
     
     # 分页逻辑
     files_per_page = 8
@@ -1163,7 +1413,8 @@ async def _show_file_selection(
     
     # 构建文件列表文本
     file_lines = []
-    for i, ((file_id, file_name, file_size), msg) in enumerate(files_info):
+    for i, file_state in enumerate(files_info):
+        file_id, file_name, file_size = _file_state_info(file_state)
         status = "✅" if selections[i] else "❌"
         size_mb = file_size / 1024 / 1024
         safe_name = escape_md(file_name[:25] + "..." if len(file_name) > 25 else file_name)
@@ -1174,7 +1425,7 @@ async def _show_file_selection(
     # 统计选中信息
     selected_count = sum(1 for s in selections if s)
     selected_size = sum(
-        files_info[i][0][2] for i in range(len(files_info)) if selections[i]
+        int(files_info[i].get("file_size") or 0) for i in range(len(files_info)) if selections[i]
     ) / 1024 / 1024
     
     message_text = (
@@ -1248,7 +1499,7 @@ async def _show_status_cancel_selection(query, status_session_id: str):
     """
     刷新 /status 的取消下载选择界面
     """
-    session = _status_cancel_selections.get(status_session_id)
+    session = _get_interaction_state("status_cancel_selections", status_session_id)
     if not session:
         await query.edit_message_text("Status selection session expired.")
         return
@@ -1280,7 +1531,7 @@ async def _show_status_cancel_selection(query, status_session_id: str):
             lines.append(f"> {mark} {i + 1}. `_Download already finished or removed_`\n")
 
     if active_count == 0:
-        _status_cancel_selections.pop(status_session_id, None)
+        _pop_interaction_state("status_cancel_selections", status_session_id)
         await query.edit_message_text("No files are being downloaded at the moment.")
         return
 
@@ -1309,6 +1560,7 @@ async def _show_status_cancel_selection(query, status_session_id: str):
 @auth_required
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Button command received")
+    _prune_stale_interaction_state()
     query = update.callback_query
     await query.answer()
 
@@ -1341,7 +1593,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         last_underscore = parts.rfind("_")
         status_session_id = parts[:last_underscore]
         file_idx = int(parts[last_underscore + 1:])
-        session = _status_cancel_selections.get(status_session_id)
+        session = _get_interaction_state("status_cancel_selections", status_session_id)
         if session and 0 <= file_idx < len(session['selected']):
             session['selected'][file_idx] = not session['selected'][file_idx]
         await _show_status_cancel_selection(query, status_session_id)
@@ -1352,7 +1604,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         last_underscore = parts.rfind("_")
         status_session_id = parts[:last_underscore]
         page = int(parts[last_underscore + 1:])
-        session = _status_cancel_selections.get(status_session_id)
+        session = _get_interaction_state("status_cancel_selections", status_session_id)
         if session:
             session['page'] = page
         await _show_status_cancel_selection(query, status_session_id)
@@ -1360,7 +1612,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if query.data.startswith("stc_sall_"):
         status_session_id = query.data[len("stc_sall_"):]
-        session = _status_cancel_selections.get(status_session_id)
+        session = _get_interaction_state("status_cancel_selections", status_session_id)
         if session:
             for i, file_id in enumerate(session['file_ids']):
                 session['selected'][i] = file_id in downloading_files
@@ -1369,7 +1621,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if query.data.startswith("stc_dsall_"):
         status_session_id = query.data[len("stc_dsall_"):]
-        session = _status_cancel_selections.get(status_session_id)
+        session = _get_interaction_state("status_cancel_selections", status_session_id)
         if session:
             session['selected'] = [False] * len(session['selected'])
         await _show_status_cancel_selection(query, status_session_id)
@@ -1377,7 +1629,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if query.data.startswith("stc_conf_"):
         status_session_id = query.data[len("stc_conf_"):]
-        session = _status_cancel_selections.pop(status_session_id, None)
+        session = _pop_interaction_state("status_cancel_selections", status_session_id)
         if not session:
             await query.edit_message_text("Status selection session expired.")
             return
@@ -1390,7 +1642,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if not selected_file_ids:
             await query.answer("⚠️ Please select at least one downloading file!", show_alert=True)
-            _status_cancel_selections[status_session_id] = session
+            _set_interaction_state("status_cancel_selections", status_session_id, session)
             return
 
         cancelled_names = []
@@ -1424,7 +1676,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if query.data.startswith("stc_close_"):
         status_session_id = query.data[len("stc_close_"):]
-        _status_cancel_selections.pop(status_session_id, None)
+        _pop_interaction_state("status_cancel_selections", status_session_id)
         await query.edit_message_reply_markup(reply_markup=None)
         return
 
@@ -1432,13 +1684,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if query.data.startswith("media_group_yes_") or query.data.startswith("media_group_no_"):
         media_group_id = query.data.split("_", 3)[3]
         
-        if media_group_id not in _media_group_confirmations:
+        if not _get_interaction_state("media_group_confirmations", media_group_id):
             await query.edit_message_text("Media group not found or already processed.")
             return
         
-        media_group_info = _media_group_confirmations.pop(media_group_id)
-        files_info = media_group_info['files_info']
-        group_context = media_group_info['context']
+        media_group_info = _pop_interaction_state("media_group_confirmations", media_group_id)
+        files_info = media_group_info["files"]
         
         await update.effective_message.edit_reply_markup(reply_markup=None)
         
@@ -1462,7 +1713,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         fail_count = 0
         failed_files = []
         
-        for index, ((file_id, file_name, file_size), message) in enumerate(files_info, start=1):
+        for index, file_state in enumerate(files_info, start=1):
+            file_id, file_name, file_size = _file_state_info(file_state)
             await query.edit_message_text(
                 f"⬇️ *Batch download in progress*\n\n"
                 f"> 📄 *Current:* `{index}/{len(files_info)}` `{escape_md(file_name)}`\n"
@@ -1474,8 +1726,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 file_id,
                 file_name,
                 file_size,
-                message,
-                group_context,
+                query.message,
+                context,
                 status_message=query.message,
                 batch_progress=(success_count, len(files_info)),
                 suppress_success_status=True,
@@ -1484,7 +1736,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 success_count += 1
             else:
                 fail_count += 1
-                failed_files.append((file_id, file_name, file_size, message))
+                failed_files.append(file_state)
             # 给每个文件下载之间一点间隔
             await asyncio.sleep(0.5)
         
@@ -1506,7 +1758,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     [
                         [
                             InlineKeyboardButton("🔄 Retry All Failed", callback_data=f"retry_media_group_{media_group_id}"),
-                            InlineKeyboardButton("❌ Cancel", callback_data="cancel_retry"),
+                            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_retry_media_group_{media_group_id}"),
                         ]
                     ]
                 ),
@@ -1516,10 +1768,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         # 存储失败文件信息用于重试
         if failed_files:
-            _media_group_failed_files[media_group_id] = {
-                'failed_files': failed_files,
-                'context': group_context
-            }
+            _set_interaction_state(
+                "media_group_failed_files",
+                media_group_id,
+                {"files": failed_files},
+            )
         
         return
     
@@ -1538,10 +1791,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         media_group_id = parts[:last_underscore]
         file_idx = int(parts[last_underscore + 1:])
         
-        if media_group_id in _media_group_file_selections:
-            selections = _media_group_file_selections[media_group_id]
+        selection_state = _get_interaction_state("media_group_file_selections", media_group_id)
+        if selection_state:
+            selections = selection_state["selected"]
             if 0 <= file_idx < len(selections):
                 selections[file_idx] = not selections[file_idx]
+            _set_interaction_state("media_group_file_selections", media_group_id, selection_state)
         
         # 计算当前页
         files_per_page = 8
@@ -1561,16 +1816,20 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if query.data.startswith("mgs_sall_"):
         # 全选
         media_group_id = query.data[len("mgs_sall_"):]
-        if media_group_id in _media_group_file_selections:
-            _media_group_file_selections[media_group_id] = [True] * len(_media_group_file_selections[media_group_id])
+        selection_state = _get_interaction_state("media_group_file_selections", media_group_id)
+        if selection_state:
+            selection_state["selected"] = [True] * len(selection_state["selected"])
+            _set_interaction_state("media_group_file_selections", media_group_id, selection_state)
         await _show_file_selection(query, media_group_id, page=0)
         return
     
     if query.data.startswith("mgs_dsall_"):
         # 全不选
         media_group_id = query.data[len("mgs_dsall_"):]
-        if media_group_id in _media_group_file_selections:
-            _media_group_file_selections[media_group_id] = [False] * len(_media_group_file_selections[media_group_id])
+        selection_state = _get_interaction_state("media_group_file_selections", media_group_id)
+        if selection_state:
+            selection_state["selected"] = [False] * len(selection_state["selected"])
+            _set_interaction_state("media_group_file_selections", media_group_id, selection_state)
         await _show_file_selection(query, media_group_id, page=0)
         return
     
@@ -1578,18 +1837,19 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # 确认选择并下载
         media_group_id = query.data[len("mgs_conf_"):]
         
-        if media_group_id not in _media_group_confirmations:
+        media_group_info = _get_interaction_state("media_group_confirmations", media_group_id)
+        if not media_group_info:
             await query.edit_message_text("⚠️ Media group session expired.")
             return
         
-        selections = _media_group_file_selections.get(media_group_id, [])
+        selection_state = _get_interaction_state("media_group_file_selections", media_group_id) or {}
+        selections = selection_state.get("selected", [])
         if not any(selections):
             await query.answer("⚠️ Please select at least one file!", show_alert=True)
             return
         
-        media_group_info = _media_group_confirmations.pop(media_group_id)
-        files_info = media_group_info['files_info']
-        group_context = media_group_info['context']
+        media_group_info = _pop_interaction_state("media_group_confirmations", media_group_id)
+        files_info = media_group_info["files"]
         
         # 过滤出选中的文件
         selected_files = [
@@ -1597,7 +1857,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
         
         # 清理选择状态
-        _media_group_file_selections.pop(media_group_id, None)
+        _pop_interaction_state("media_group_file_selections", media_group_id)
         
         await query.edit_message_text(
             f"⬇️ Starting download of {len(selected_files)} selected file(s)..."
@@ -1610,7 +1870,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         fail_count = 0
         failed_files = []
         
-        for index, ((file_id, file_name, file_size), message) in enumerate(selected_files, start=1):
+        for index, file_state in enumerate(selected_files, start=1):
+            file_id, file_name, file_size = _file_state_info(file_state)
             await query.edit_message_text(
                 f"⬇️ *Selective download in progress*\n\n"
                 f"> 📄 *Current:* `{index}/{len(selected_files)}` `{escape_md(file_name)}`\n"
@@ -1622,8 +1883,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 file_id,
                 file_name,
                 file_size,
-                message,
-                group_context,
+                query.message,
+                context,
                 status_message=query.message,
                 batch_progress=(success_count, len(selected_files)),
                 suppress_success_status=True,
@@ -1632,7 +1893,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 success_count += 1
             else:
                 fail_count += 1
-                failed_files.append((file_id, file_name, file_size, message))
+                failed_files.append(file_state)
             await asyncio.sleep(0.5)
         
         # 发送总结消息
@@ -1645,10 +1906,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         if failed_files:
             summary_message += "\n\n🔄 *Failed files can be retried individually*"
-            _media_group_failed_files[media_group_id] = {
-                'failed_files': failed_files,
-                'context': group_context
-            }
+            _set_interaction_state(
+                "media_group_failed_files",
+                media_group_id,
+                {"files": failed_files},
+            )
             await query.edit_message_text(
                 summary_message,
                 parse_mode="Markdown",
@@ -1656,7 +1918,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     [
                         [
                             InlineKeyboardButton("🔄 Retry All Failed", callback_data=f"retry_media_group_{media_group_id}"),
-                            InlineKeyboardButton("❌ Cancel", callback_data="cancel_retry"),
+                            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_retry_media_group_{media_group_id}"),
                         ]
                     ]
                 ),
@@ -1669,17 +1931,18 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if query.data.startswith("mgs_cancel_"):
         # 取消选择，清理状态
         media_group_id = query.data[len("mgs_cancel_"):]
-        _media_group_file_selections.pop(media_group_id, None)
+        _pop_interaction_state("media_group_file_selections", media_group_id)
         
         # 恢复原始确认界面
-        if media_group_id in _media_group_confirmations:
-            media_group_info = _media_group_confirmations[media_group_id]
-            files_info = media_group_info['files_info']
+        media_group_info = _get_interaction_state("media_group_confirmations", media_group_id)
+        if media_group_info:
+            files_info = media_group_info["files"]
             
             # 重新构建文件列表
             files_list = []
             total_size = 0
-            for (file_id, file_name, file_size), message in files_info:
+            for file_state in files_info:
+                file_id, file_name, file_size = _file_state_info(file_state)
                 size_mb = file_size / 1024 / 1024
                 total_size += size_mb
                 safe_name = escape_md(file_name)
@@ -1718,14 +1981,20 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info("Retry cancelled by user")
         await query.edit_message_text("Retry cancelled.")
         return
+
+    if query.data.startswith("cancel_retry_media_group_"):
+        media_group_id = query.data[len("cancel_retry_media_group_"):]
+        _pop_interaction_state("media_group_failed_files", media_group_id)
+        logger.info("Media group retry cancelled by user: %s", media_group_id)
+        await query.edit_message_text("Retry cancelled.")
+        return
     
     # 处理媒体组重试（在单个文件确认之前拦截）
     if query.data.startswith("retry_media_group_"):
         media_group_id = query.data[len("retry_media_group_"):]
-        if media_group_id in _media_group_failed_files:
-            failed_info = _media_group_failed_files.pop(media_group_id)
-            failed_files = failed_info['failed_files']
-            retry_context = failed_info['context']
+        failed_info = _pop_interaction_state("media_group_failed_files", media_group_id)
+        if failed_info:
+            failed_files = failed_info["files"]
             
             logger.info(f"Retrying {len(failed_files)} failed files from media group {media_group_id}")
             await query.edit_message_text(f"🔄 Retrying {len(failed_files)} failed file(s)...")
@@ -1733,7 +2002,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             success_count = 0
             fail_count = 0
             
-            for index, (file_id, file_name, file_size, message) in enumerate(failed_files, start=1):
+            for index, file_state in enumerate(failed_files, start=1):
+                file_id, file_name, file_size = _file_state_info(file_state)
                 await query.edit_message_text(
                     f"🔄 *Retry in progress*\n\n"
                     f"> 📄 *Current:* `{index}/{len(failed_files)}` `{escape_md(file_name)}`\n"
@@ -1745,8 +2015,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     file_id,
                     file_name,
                     file_size,
-                    message,
-                    retry_context,
+                    query.message,
+                    context,
                     status_message=query.message,
                     batch_progress=(success_count, len(failed_files)),
                     suppress_success_status=True,
