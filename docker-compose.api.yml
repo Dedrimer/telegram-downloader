@@ -17,6 +17,7 @@ services:
             TELEGRAM_LOCAL: "${TELEGRAM_LOCAL}"
         volumes:
             - ${BOT_API_DIR}:/var/lib/telegram-bot-api
+            - ${DOWNLOAD_TO_DIR}:/app/downloads
         ports:
             - 8081:8081
         env_file:

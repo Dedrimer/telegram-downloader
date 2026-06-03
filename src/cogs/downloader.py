@@ -147,6 +147,9 @@ def _copy_file_low_cache(source_path: str, target_path: str) -> None:
 
 
 def _move_file_low_cache(source_path: str, target_path: str) -> None:
+    if os.path.abspath(source_path) == os.path.abspath(target_path):
+        return
+
     try:
         os.replace(source_path, target_path)
         return

@@ -2,12 +2,13 @@ import asyncio
 import json
 import logging
 import os
+from types import SimpleNamespace
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from telegram import Bot, File
+from telegram import Bot
 from telegram.error import NetworkError, TimedOut, TelegramError
 
 from src.utils.env import env
@@ -23,6 +24,7 @@ MAX_RETRY_DELAY = 60  # 最大重试延迟时间（秒）
 
 # Environment variables
 DOWNLOAD_TO_DIR = env.DOWNLOAD_TO_DIR
+DOWNLOAD_TO_DIR_ABSOLUTE = os.path.abspath(DOWNLOAD_TO_DIR)
 CANCEL_FILE_DOWNLOAD_TIMEOUT = 10
 GET_FILE_DOWNLOAD_PROGRESS_TIMEOUT = 10
 CANCELLED_FILE_DOWNLOAD_TEXT = "file download was cancelled"
@@ -45,7 +47,7 @@ def _post_bot_api_form(method: str, data: dict[str, str], timeout: int) -> Any:
     )
 
     try:
-        with urlopen(request, timeout=CANCEL_FILE_DOWNLOAD_TIMEOUT) as response:
+        with urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read())
     except HTTPError as error:
         body = error.read()
@@ -101,14 +103,14 @@ async def get_file_download_progress(file_id: str) -> dict[str, Any]:
     return await asyncio.to_thread(_get_file_download_progress_sync, file_id)
 
 
-async def get_file(bot: Bot, file: DownloadFile) -> File:
+async def get_file(bot: Bot, file: DownloadFile) -> Any:
     """
     Download a file from Telegram with enhanced retry logic.
     Args:
         bot (Bot): The bot instance used to download the file.
         file (DownloadFile): The download file object (containing file_id).
     Returns:
-        File: The downloaded file object.
+        dict: The Bot API getFile response object.
     Raises:
         Exception: If the maximum number of retries is reached/non network error occurs
         or file already exists.
@@ -127,9 +129,20 @@ async def get_file(bot: Bot, file: DownloadFile) -> File:
         check_file_exists(file.file_id, file.file_name, check_downloading_files=False)
 
         try:
-            new_file = await bot.get_file(file.file_id, read_timeout=1800)
+            new_file = await asyncio.to_thread(
+                _post_bot_api_form,
+                "getFile",
+                {
+                    "file_id": file.file_id,
+                    "download_to_dir": DOWNLOAD_TO_DIR_ABSOLUTE,
+                    "download_file_name": file.file_name,
+                },
+                1800,
+            )
+            if not isinstance(new_file, dict):
+                raise TelegramError("Invalid getFile result")
             logger.info(f"File '{file.file_name}' downloaded successfully on attempt {attempt + 1}")
-            return new_file
+            return SimpleNamespace(**new_file)
         except NetworkError as e:
             if file.cancel_requested or is_cancelled_file_download_error(e):
                 raise asyncio.CancelledError from e
@@ -192,7 +205,7 @@ def check_file_exists(
     Raises:
         Exception: If the file already exists in the download directory or is being downloaded.
     """
-    if os.path.exists(DOWNLOAD_TO_DIR + file_name):
+    if os.path.exists(os.path.join(DOWNLOAD_TO_DIR, file_name)):
         raise Exception("File already exists in downloads folder.")
 
     if check_downloading_files:

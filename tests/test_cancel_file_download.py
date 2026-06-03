@@ -18,12 +18,12 @@ from src.models import DownloadFile  # noqa: E402
 get_file_module = importlib.import_module("src.utils.get_file")
 
 
-class FakeGetFileBot:
+class FakeGetFileRequest:
     def __init__(self, error):
         self.error = error
         self.calls = 0
 
-    async def get_file(self, file_id, read_timeout=None):
+    def __call__(self, method, data, timeout):
         self.calls += 1
         raise self.error
 
@@ -44,23 +44,25 @@ class FakeResponse:
 
 class CancelFileDownloadTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_get_file_response_stops_retries(self):
-        bot = FakeGetFileBot(BadRequest("file download was cancelled"))
+        get_file_request = FakeGetFileRequest(BadRequest("file download was cancelled"))
         download_file = DownloadFile("file-id", "movie.mkv", 1024)
 
-        with self.assertRaises(asyncio.CancelledError):
-            await get_file_module.get_file(bot, download_file)
+        with patch.object(get_file_module, "_post_bot_api_form", get_file_request):
+            with self.assertRaises(asyncio.CancelledError):
+                await get_file_module.get_file(None, download_file)
 
-        self.assertEqual(bot.calls, 1)
+        self.assertEqual(get_file_request.calls, 1)
 
     async def test_cancel_requested_stops_network_errors(self):
-        bot = FakeGetFileBot(BadRequest("temporary network failure"))
+        get_file_request = FakeGetFileRequest(BadRequest("temporary network failure"))
         download_file = DownloadFile("file-id", "movie.mkv", 1024)
         download_file.request_cancel()
 
-        with self.assertRaises(asyncio.CancelledError):
-            await get_file_module.get_file(bot, download_file)
+        with patch.object(get_file_module, "_post_bot_api_form", get_file_request):
+            with self.assertRaises(asyncio.CancelledError):
+                await get_file_module.get_file(None, download_file)
 
-        self.assertEqual(bot.calls, 0)
+        self.assertEqual(get_file_request.calls, 0)
         self.assertEqual(download_file.status, "Cancelling")
 
 
