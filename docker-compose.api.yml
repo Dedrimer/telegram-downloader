@@ -15,8 +15,9 @@ services:
             TELEGRAM_API_ID: "${TELEGRAM_API_ID}"
             TELEGRAM_API_HASH: "${TELEGRAM_API_HASH}"
             TELEGRAM_LOCAL: "${TELEGRAM_LOCAL}"
+            TELEGRAM_DOWNLOAD_DIR: "/app/downloads"
+            TELEGRAM_WORK_DIR: "/app/downloads/.bot-api"
         volumes:
-            - ${BOT_API_DIR}:/var/lib/telegram-bot-api
             - ${DOWNLOAD_TO_DIR}:/app/downloads
         ports:
             - 8081:8081
