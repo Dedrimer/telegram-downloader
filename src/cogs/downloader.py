@@ -82,6 +82,12 @@ _DOWNLOAD_PROGRESS_CANCEL_TIMEOUT = 1.0
 _DOWNLOAD_STATUS_UPDATE_DEFAULT_INTERVAL = 5.0
 _DOWNLOAD_STATUS_UPDATE_MIN_INTERVAL = 3.0
 _DOWNLOAD_STATUS_UPDATE_MAX_INTERVAL = 60.0
+_TELEGRAM_MESSAGE_LIMIT = 4096
+_TELEGRAM_MESSAGE_SAFE_LIMIT = 3900
+_STATUS_FILES_PER_PAGE = 8
+_STATUS_FILE_NAME_DISPLAY_LIMIT = 96
+_DOWNLOAD_FILE_NAME_DISPLAY_LIMIT = 160
+_MEDIA_GROUP_FILE_NAME_DISPLAY_LIMIT = 80
 _DOWNLOAD_CONCURRENCY_DEFAULT = 1
 _DOWNLOAD_CONCURRENCY_MIN = 1
 _DOWNLOAD_CONCURRENCY_MAX = 1
@@ -328,6 +334,36 @@ def _file_state_info(file_state: dict[str, Any]) -> tuple[str, str, int]:
     )
 
 
+def _truncate_text(text: Any, limit: int) -> str:
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    return text[: limit - 3] + "..."
+
+
+def _escape_display_text(text: Any, limit: int) -> str:
+    return escape_md(_truncate_text(text, limit))
+
+
+def _limit_telegram_message(text: str, limit: int = _TELEGRAM_MESSAGE_SAFE_LIMIT) -> str:
+    limit = min(limit, _TELEGRAM_MESSAGE_LIMIT)
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
+    if len(text) <= limit:
+        return text
+    suffix = "\n..."
+    cutoff = max(0, limit - len(suffix))
+    newline = text.rfind("\n", 0, cutoff)
+    if newline >= max(0, cutoff - 500):
+        return text[:newline] + suffix
+    return _truncate_text(text, limit)
+
+
 def _clamp_single_file_group_delay(delay: float) -> float:
     return max(_SINGLE_FILE_GROUP_MIN_DELAY, min(delay, _SINGLE_FILE_GROUP_MAX_DELAY))
 
@@ -417,11 +453,11 @@ def _build_status_cancel_keyboard(status_session_id: str, file_ids: List[str], s
     keyboard = []
     row = []
     active_file_ids = [file_id for file_id in file_ids if file_id in downloading_files]
-    total_pages = math.ceil(len(active_file_ids) / 8) if active_file_ids else 1
+    total_pages = math.ceil(len(active_file_ids) / _STATUS_FILES_PER_PAGE) if active_file_ids else 1
     page = int((_get_interaction_state("status_cancel_selections", status_session_id) or {}).get('page', 0))
     page = max(0, min(page, total_pages - 1))
-    start_idx = page * 8
-    end_idx = start_idx + 8
+    start_idx = page * _STATUS_FILES_PER_PAGE
+    end_idx = start_idx + _STATUS_FILES_PER_PAGE
     active_index_set = set(active_file_ids[start_idx:end_idx])
 
     for i, file_id in enumerate(file_ids):
@@ -488,7 +524,7 @@ def _build_download_status_text(
         )
     return (
         f"{title}\n\n"
-        f"> *File:* `{escape_md(download_file.file_name)}`\n"
+        f"> *File:* `{_escape_display_text(download_file.file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)}`\n"
         f"> *Size:* `{escape_md(download_file.file_size_mb)}`\n"
         f"> *Status:* `{escape_md(download_file.status)}`\n"
         f"{batch_line}"
@@ -499,6 +535,68 @@ def _build_download_status_text(
         f"> *Duration:* `{escape_md(download_file.current_download_duration)}`\n"
         f"> *Retries:* `{download_file.download_retries}`"
     )
+
+
+def _get_status_page_entries(
+    file_ids: List[str],
+    page: int,
+) -> tuple[list[tuple[int, str]], int, int, int]:
+    active_entries = [
+        (index, file_id)
+        for index, file_id in enumerate(file_ids)
+        if file_id in downloading_files
+    ]
+    active_count = len(active_entries)
+    total_pages = math.ceil(active_count / _STATUS_FILES_PER_PAGE) if active_count else 1
+    page = max(0, min(int(page or 0), total_pages - 1))
+    start_idx = page * _STATUS_FILES_PER_PAGE
+    end_idx = start_idx + _STATUS_FILES_PER_PAGE
+    return active_entries[start_idx:end_idx], active_count, total_pages, page
+
+
+def _build_status_message_text(
+    file_ids: List[str],
+    selected: Optional[List[bool]] = None,
+    page: int = 0,
+) -> tuple[str, int, int, int, int]:
+    page_entries, active_count, total_pages, page = _get_status_page_entries(file_ids, page)
+    selected = selected or [False] * len(file_ids)
+    selected_count = sum(
+        1
+        for i, file_id in enumerate(file_ids)
+        if i < len(selected) and selected[i] and file_id in downloading_files
+    )
+
+    lines = ["*Downloading files status:*\n"]
+    for original_index, file_id in page_entries:
+        file = downloading_files[file_id]
+        mark = ""
+        if selected:
+            mark = "鉁? " if original_index < len(selected) and selected[original_index] else "鉂? "
+        safe_file_name = _escape_display_text(
+            file.file_name,
+            _STATUS_FILE_NAME_DISPLAY_LIMIT,
+        )
+        safe_status = escape_md(file.status)
+        lines.append(
+            f"> {mark}{original_index + 1}. 馃搫 *File name:* `{safe_file_name}`\n"
+            f"> 馃捑 *File size:* `{escape_md(file.file_size_mb)}`\n"
+            f"> *Downloaded:* `{escape_md(file.downloaded_size)}`\n"
+            f"> *Progress:* `{escape_md(file.download_progress)}`\n"
+            f"> *Speed:* `{escape_md(file.download_speed)}`\n"
+            f"> 鈴?*Start time:* `{escape_md(file.start_datetime)}`\n"
+            f"> 鈴?*Duration:* `{escape_md(file.current_download_duration)}`\n"
+            f"> 馃敾 *Retries:* `{file.download_retries}`\n"
+            f"> 馃攧 *Status:* `{safe_status}`\n"
+        )
+
+    lines.append(
+        f"\n> 馃洃 *Selected to cancel:* `{selected_count}/{active_count}`\n"
+        f"> 馃搫 *Page:* `{page + 1}/{total_pages}`\n\n"
+        "Select files below, then press *Cancel Selected* to cancel downloads.\n"
+        "鉂?means not selected, 鉁?means selected."
+    )
+    return _limit_telegram_message("\n".join(lines)), active_count, selected_count, total_pages, page
 
 
 def _get_bot_api_progress_root() -> str:
@@ -641,6 +739,21 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         },
     )
 
+    file_ids = [file_id for file_id, _ in files_items]
+    selected = [False] * len(files_items)
+    keyboard = _build_status_cancel_keyboard(status_session_id, file_ids, selected)
+    status_message, _, _, _, _ = _build_status_message_text(
+        file_ids,
+        selected,
+        page=0,
+    )
+    await update.message.reply_text(
+        status_message,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return
+
     status_message = "*Downloading files status:*\n"
     for i, (file_id, file) in enumerate(files_items, start=1):
         # 🌟 使用转义函数处理文件名和状态等字符串
@@ -719,7 +832,7 @@ async def _send_single_file_confirmation(
     except Exception as e:
         logger.warning(f"File exist check hit an issue (Ignored): {e}")
 
-    safe_file_name = escape_md(file_name)
+    safe_file_name = _escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)
     safe_file_size = escape_md(DownloadFile.convert_size(file_size))
 
     response_message = (
@@ -730,7 +843,7 @@ async def _send_single_file_confirmation(
 
     await context.bot.send_message(
         chat_id=message.chat_id,
-        text=response_message,
+        text=_limit_telegram_message(response_message),
         reply_to_message_id=message.message_id,
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(
@@ -934,7 +1047,7 @@ async def _handle_media_group_download(
     for (file_id, file_name, file_size), message in files_info:
         size_mb = file_size / 1024 / 1024
         total_size += size_mb
-        safe_name = escape_md(file_name)
+        safe_name = _escape_display_text(file_name, _MEDIA_GROUP_FILE_NAME_DISPLAY_LIMIT)
         files_list.append(f"> 📄 `{safe_name}` ({size_mb:.2f} MB)")
     
     files_text = "\n".join(files_list)
@@ -957,7 +1070,7 @@ async def _handle_media_group_download(
     
     await context.bot.send_message(
         chat_id=chat_id,
-        text=response_message,
+        text=_limit_telegram_message(response_message),
         reply_to_message_id=first_message.message_id,
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(
@@ -1005,6 +1118,7 @@ async def _update_download_status(
     """
     更新下载状态消息；优先编辑原提示消息，失败时才降级发送新消息
     """
+    text = _limit_telegram_message(text)
     if status_message:
         try:
             await status_message.edit_text(
@@ -1214,7 +1328,7 @@ async def _download_single_file(
             await _update_download_status(
                 status_message,
                 message,
-                f"🛑 *Download cancelled*\n\n> 📄 *File:* `{escape_md(file_name)}`",
+                f"🛑 *Download cancelled*\n\n> 📄 *File:* `{_escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)}`",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(
                     [
@@ -1233,7 +1347,7 @@ async def _download_single_file(
         _download_tasks.pop(file_id, None)
         _download_cancel_tokens.pop(cancel_token, None)
         error_text = escape_md(str(e))
-        safe_file_name = escape_md(file_name)
+        safe_file_name = _escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)
         
         # 提供重试按钮，使用简单的文本格式避免Markdown解析问题
         retry_message = (
@@ -1363,7 +1477,7 @@ async def _download_single_file(
         except Exception as e:
             logger.warning(f"Failed to change permissions: {e}")
 
-    safe_file_name_final = escape_md(file_name)
+    safe_file_name_final = _escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)
     response_message = (
         f"✅ File downloaded successfully.\n\n"
         f"> 📄 *File:* `{safe_file_name_final}`\n"
@@ -1416,11 +1530,12 @@ async def _show_file_selection(
     
     # 构建文件列表文本
     file_lines = []
-    for i, file_state in enumerate(files_info):
+    for i in range(start_idx, end_idx):
+        file_state = files_info[i]
         file_id, file_name, file_size = _file_state_info(file_state)
         status = "✅" if selections[i] else "❌"
         size_mb = file_size / 1024 / 1024
-        safe_name = escape_md(file_name[:25] + "..." if len(file_name) > 25 else file_name)
+        safe_name = _escape_display_text(file_name, _MEDIA_GROUP_FILE_NAME_DISPLAY_LIMIT)
         file_lines.append(f"{status} {i+1}. `{safe_name}` ({size_mb:.2f} MB)")
     
     files_text = "\n".join(file_lines)
@@ -1492,7 +1607,7 @@ async def _show_file_selection(
     ])
     
     await query.edit_message_text(
-        message_text,
+        _limit_telegram_message(message_text),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -1509,6 +1624,27 @@ async def _show_status_cancel_selection(query, status_session_id: str):
 
     file_ids = session['file_ids']
     selected = session['selected']
+
+    page = int(session.get('page', 0))
+    text, active_count, _, _, page = _build_status_message_text(
+        file_ids,
+        selected,
+        page=page,
+    )
+    session['page'] = page
+
+    if active_count == 0:
+        _pop_interaction_state("status_cancel_selections", status_session_id)
+        await query.edit_message_text("No files are being downloaded at the moment.")
+        return
+
+    keyboard = _build_status_cancel_keyboard(status_session_id, file_ids, selected)
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return
 
     lines = ["*Downloading files status:*\n"]
     active_count = 0
@@ -1578,7 +1714,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         file = downloading_files.get(file_id)
         cancel_started = await _cancel_download(file_id)
         if cancel_started:
-            safe_file_name = escape_md(file.file_name if file else file_id)
+            safe_file_name = _escape_display_text(file.file_name if file else file_id, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)
             await query.edit_message_text(
                 f"🛑 *Cancelling download...*\n\n> 📄 *File:* `{safe_file_name}`",
                 parse_mode="Markdown",
@@ -1670,11 +1806,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         lines = ["🛑 *Cancel request sent*\n"]
         for name in cancelled_names:
-            lines.append(f"> 📄 `{escape_md(name)}`")
+            lines.append(f"> 📄 `{_escape_display_text(name, _STATUS_FILE_NAME_DISPLAY_LIMIT)}`")
         if missing_count:
             lines.append(f"\n> ⚠️ Missing task records: `{missing_count}`")
 
-        await query.edit_message_text("\n".join(lines), parse_mode="Markdown")
+        await query.edit_message_text(
+            _limit_telegram_message("\n".join(lines)),
+            parse_mode="Markdown",
+        )
         return
 
     if query.data.startswith("stc_close_"):
@@ -1720,7 +1859,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             file_id, file_name, file_size = _file_state_info(file_state)
             await query.edit_message_text(
                 f"⬇️ *Batch download in progress*\n\n"
-                f"> 📄 *Current:* `{index}/{len(files_info)}` `{escape_md(file_name)}`\n"
+                f"> 📄 *Current:* `{index}/{len(files_info)}` `{_escape_display_text(file_name, _MEDIA_GROUP_FILE_NAME_DISPLAY_LIMIT)}`\n"
                 f"> ✅ *Successful:* `{success_count}`\n"
                 f"> ❌ *Failed:* `{fail_count}`",
                 parse_mode="Markdown",
@@ -1877,7 +2016,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             file_id, file_name, file_size = _file_state_info(file_state)
             await query.edit_message_text(
                 f"⬇️ *Selective download in progress*\n\n"
-                f"> 📄 *Current:* `{index}/{len(selected_files)}` `{escape_md(file_name)}`\n"
+                f"> 📄 *Current:* `{index}/{len(selected_files)}` `{_escape_display_text(file_name, _MEDIA_GROUP_FILE_NAME_DISPLAY_LIMIT)}`\n"
                 f"> ✅ *Successful:* `{success_count}`\n"
                 f"> ❌ *Failed:* `{fail_count}`",
                 parse_mode="Markdown",
@@ -1948,7 +2087,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 file_id, file_name, file_size = _file_state_info(file_state)
                 size_mb = file_size / 1024 / 1024
                 total_size += size_mb
-                safe_name = escape_md(file_name)
+                safe_name = _escape_display_text(file_name, _MEDIA_GROUP_FILE_NAME_DISPLAY_LIMIT)
                 files_list.append(f"> 📄 `{safe_name}` ({size_mb:.2f} MB)")
             
             files_text = "\n".join(files_list)
@@ -1960,7 +2099,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             
             await query.edit_message_text(
-                response_message,
+                _limit_telegram_message(response_message),
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(
                     [
@@ -2009,7 +2148,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 file_id, file_name, file_size = _file_state_info(file_state)
                 await query.edit_message_text(
                     f"🔄 *Retry in progress*\n\n"
-                    f"> 📄 *Current:* `{index}/{len(failed_files)}` `{escape_md(file_name)}`\n"
+                    f"> 📄 *Current:* `{index}/{len(failed_files)}` `{_escape_display_text(file_name, _MEDIA_GROUP_FILE_NAME_DISPLAY_LIMIT)}`\n"
                     f"> ✅ *Successful:* `{success_count}`\n"
                     f"> ❌ *Failed:* `{fail_count}`",
                     parse_mode="Markdown",

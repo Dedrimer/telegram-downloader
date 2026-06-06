@@ -83,6 +83,57 @@ class DownloadProgressTests(unittest.TestCase):
         self.assertIn("*Queued file...*", text)
         self.assertIn("*Status:* `Queued`", text)
 
+    def test_progress_status_text_truncates_long_file_name_for_display(self):
+        long_name = "video-" + ("x" * 500) + ".mp4"
+        download_file = DownloadFile("file-id", long_name, 1024)
+
+        text = downloader._build_download_status_text(download_file)
+
+        self.assertLess(len(text), len(long_name))
+        self.assertIn("...", text)
+
+    def test_status_message_lists_current_page_only(self):
+        old_downloading_files = dict(downloader.downloading_files)
+        downloader.downloading_files.clear()
+        try:
+            file_ids = []
+            for index in range(20):
+                file_id = f"file-{index}"
+                file_ids.append(file_id)
+                downloader.downloading_files[file_id] = DownloadFile(
+                    file_id,
+                    f"movie-{index}.mkv",
+                    1024,
+                )
+
+            text, active_count, selected_count, total_pages, page = (
+                downloader._build_status_message_text(
+                    file_ids,
+                    [False] * len(file_ids),
+                    page=0,
+                )
+            )
+
+            self.assertEqual(active_count, 20)
+            self.assertEqual(selected_count, 0)
+            self.assertEqual(total_pages, 3)
+            self.assertEqual(page, 0)
+            self.assertIn("movie-0.mkv", text)
+            self.assertIn("movie-7.mkv", text)
+            self.assertNotIn("movie-8.mkv", text)
+            self.assertLessEqual(len(text), downloader._TELEGRAM_MESSAGE_SAFE_LIMIT)
+        finally:
+            downloader.downloading_files.clear()
+            downloader.downloading_files.update(old_downloading_files)
+
+    def test_limit_telegram_message_prefers_line_boundary(self):
+        text = "\n".join(f"line-{index}" for index in range(1000))
+
+        limited = downloader._limit_telegram_message(text, 200)
+
+        self.assertLessEqual(len(limited), 200)
+        self.assertTrue(limited.endswith("\n..."))
+
     def test_find_download_progress_size_prefers_recent_plausible_file(self):
         old_bot_api_dir = downloader.BOT_API_DIR
         old_token_sub_dir = downloader.TOKEN_SUB_DIR
