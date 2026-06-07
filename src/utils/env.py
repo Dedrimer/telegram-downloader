@@ -23,7 +23,13 @@ class Settings(BaseSettings):
     SINGLE_FILE_GROUP_ENABLED: bool = False
     SINGLE_FILE_GROUP_DELAY: float = 1.0
     DOWNLOAD_STATUS_UPDATE_INTERVAL: float = 5.0
+    DOWNLOAD_PROGRESS_POLL_INTERVAL: float = 1.0
+    ADMIN_PROGRESS_POLL_INTERVAL: float = 0.5
     MAX_CONCURRENT_DOWNLOADS: int = 1
+    ADMIN_API_ENABLED: bool = False
+    ADMIN_API_HOST: str = "0.0.0.0"
+    ADMIN_API_PORT: int = 8088
+    ADMIN_API_TOKEN: str = ""
 
 
 logger.info("Loading environment variables")

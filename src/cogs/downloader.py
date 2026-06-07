@@ -74,7 +74,9 @@ _status_cancel_selections = {}
 # Runtime settings for collecting consecutive single-file messages into one batch.
 _SINGLE_FILE_GROUP_MIN_DELAY = 0.1
 _SINGLE_FILE_GROUP_MAX_DELAY = 60.0
-_DOWNLOAD_PROGRESS_POLL_INTERVAL = 1.0
+_DOWNLOAD_PROGRESS_POLL_INTERVAL_DEFAULT = 1.0
+_DOWNLOAD_PROGRESS_POLL_INTERVAL_MIN = 1.0
+_DOWNLOAD_PROGRESS_POLL_INTERVAL_MAX = 10.0
 _DOWNLOAD_PROGRESS_GLOBAL_UPDATE_INTERVAL = 1.0
 _DOWNLOAD_PROGRESS_EDIT_TIMEOUT = 2.0
 _DOWNLOAD_STATUS_EDIT_TIMEOUT = 8.0
@@ -377,6 +379,15 @@ def _clamp_download_status_update_interval(interval: float) -> float:
     )
 
 
+def _clamp_download_progress_poll_interval(interval: float) -> float:
+    if not math.isfinite(interval) or interval <= 0:
+        return _DOWNLOAD_PROGRESS_POLL_INTERVAL_DEFAULT
+    return max(
+        _DOWNLOAD_PROGRESS_POLL_INTERVAL_MIN,
+        min(interval, _DOWNLOAD_PROGRESS_POLL_INTERVAL_MAX),
+    )
+
+
 def _clamp_max_concurrent_downloads(value: int) -> int:
     try:
         parsed = int(value)
@@ -391,6 +402,9 @@ _single_file_grouping_delay = _clamp_single_file_group_delay(
 )
 _download_status_update_interval = _clamp_download_status_update_interval(
     runtime_settings.download_status_update_interval
+)
+_download_progress_poll_interval = _clamp_download_progress_poll_interval(
+    runtime_settings.download_progress_poll_interval
 )
 _max_concurrent_downloads = _clamp_max_concurrent_downloads(env.MAX_CONCURRENT_DOWNLOADS)
 _download_semaphore = asyncio.Semaphore(_max_concurrent_downloads)
@@ -407,6 +421,8 @@ def _build_current_runtime_settings() -> RuntimeSettings:
         single_file_group_enabled=_single_file_grouping_enabled,
         single_file_group_delay=_single_file_grouping_delay,
         download_status_update_interval=_download_status_update_interval,
+        download_progress_poll_interval=_download_progress_poll_interval,
+        admin_progress_poll_interval=runtime_settings.admin_progress_poll_interval,
     )
 
 
@@ -1205,7 +1221,7 @@ async def _monitor_download_progress(
 
     try:
         while True:
-            await asyncio.sleep(_DOWNLOAD_PROGRESS_POLL_INTERVAL)
+            await asyncio.sleep(_download_progress_poll_interval)
 
             progress_size = await _get_bot_api_progress_size(download_file)
             if (

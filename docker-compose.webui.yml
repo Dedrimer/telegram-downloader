@@ -1,0 +1,29 @@
+services:
+    bot:
+        environment:
+            ADMIN_API_ENABLED: "true"
+            ADMIN_API_HOST: "0.0.0.0"
+            ADMIN_API_PORT: "8088"
+            ADMIN_API_TOKEN: "${ADMIN_API_TOKEN:-}"
+            ADMIN_PROGRESS_POLL_INTERVAL: "${ADMIN_PROGRESS_POLL_INTERVAL:-0.5}"
+
+    admin-webui:
+        build:
+            context: ../admin-webui
+            dockerfile: Dockerfile
+        image: "telegram-downloader-admin-webui:local"
+        environment:
+            ADMIN_API_UPSTREAM: "http://bot:8088"
+            ADMIN_API_TOKEN: "${ADMIN_API_TOKEN:-}"
+            ADMIN_UI_REFRESH_INTERVAL_MS: "${ADMIN_UI_REFRESH_INTERVAL_MS:-1000}"
+            ADMIN_WEBUI_ENABLE_HTTPS: "${ADMIN_WEBUI_ENABLE_HTTPS:-false}"
+            ADMIN_WEBUI_AUTO_SELF_SIGNED: "${ADMIN_WEBUI_AUTO_SELF_SIGNED:-false}"
+            ADMIN_WEBUI_SSL_CERT: "${ADMIN_WEBUI_SSL_CERT:-/etc/nginx/certs/tls.crt}"
+            ADMIN_WEBUI_SSL_KEY: "${ADMIN_WEBUI_SSL_KEY:-/etc/nginx/certs/tls.key}"
+        ports:
+            - "${ADMIN_WEBUI_PORT:-8090}:80"
+            - "${ADMIN_WEBUI_HTTPS_PORT:-8443}:443"
+        volumes:
+            - ${ADMIN_WEBUI_CERTS_DIR:-./certs}:/etc/nginx/certs:ro
+        depends_on:
+            - bot

@@ -19,6 +19,8 @@ class RuntimeSettingsTests(unittest.TestCase):
             single_file_group_enabled=False,
             single_file_group_delay=1.0,
             download_status_update_interval=5.0,
+            download_progress_poll_interval=1.0,
+            admin_progress_poll_interval=0.5,
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -31,6 +33,8 @@ class RuntimeSettingsTests(unittest.TestCase):
                 single_file_group_enabled=True,
                 single_file_group_delay=2.5,
                 download_status_update_interval=8.0,
+                download_progress_poll_interval=2.0,
+                admin_progress_poll_interval=0.25,
             )
             store.save(updated)
 
@@ -41,6 +45,8 @@ class RuntimeSettingsTests(unittest.TestCase):
                 payload,
                 {
                     "download_status_update_interval": 8.0,
+                    "download_progress_poll_interval": 2.0,
+                    "admin_progress_poll_interval": 0.25,
                     "single_file_group_delay": 2.5,
                     "single_file_group_enabled": True,
                 },
@@ -52,6 +58,8 @@ class RuntimeSettingsTests(unittest.TestCase):
             single_file_group_enabled=False,
             single_file_group_delay=1.0,
             download_status_update_interval=5.0,
+            download_progress_poll_interval=1.0,
+            admin_progress_poll_interval=0.5,
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -62,6 +70,8 @@ class RuntimeSettingsTests(unittest.TestCase):
                         "single_file_group_enabled": "yes",
                         "single_file_group_delay": "invalid",
                         "download_status_update_interval": -1,
+                        "download_progress_poll_interval": 0,
+                        "admin_progress_poll_interval": "bad",
                     },
                     settings_file,
                 )
@@ -71,6 +81,8 @@ class RuntimeSettingsTests(unittest.TestCase):
             self.assertTrue(settings.single_file_group_enabled)
             self.assertEqual(settings.single_file_group_delay, 1.0)
             self.assertEqual(settings.download_status_update_interval, 5.0)
+            self.assertEqual(settings.download_progress_poll_interval, 1.0)
+            self.assertEqual(settings.admin_progress_poll_interval, 0.5)
 
 
 if __name__ == "__main__":

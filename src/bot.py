@@ -3,6 +3,7 @@ import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+from .admin_api import capture_application_loop, configure_application, start_admin_api
 from .cogs import downloader_commands, error_handler, general_commands
 from .utils import env
 
@@ -23,8 +24,10 @@ def main() -> None:
         .local_mode(True)
         .base_url(f"{env.LOCAL_BOT_API_URL}/bot")
         .base_file_url(f"{env.LOCAL_BOT_API_URL}/file/bot")
+        .post_init(capture_application_loop)
         .build()
     )
+    configure_application(application)
 
     # on different commands - answer in Telegram
     application.add_handler(CommandHandler("bad_command", bad_command))
@@ -33,6 +36,8 @@ def main() -> None:
 
     # error handler
     application.add_error_handler(error_handler)
+
+    start_admin_api()
 
     # Run the bot until the user presses Ctrl-C
     application.run_polling(allowed_updates=Update.ALL_TYPES)
