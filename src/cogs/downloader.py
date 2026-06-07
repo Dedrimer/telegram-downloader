@@ -6,6 +6,7 @@ import math
 import os
 import platform
 import re
+import secrets
 import shutil
 import time
 import traceback
@@ -71,6 +72,9 @@ _download_cancel_tokens = {}
 # 存储 /status 取消下载选择状态
 _status_cancel_selections = {}
 
+# Store overwrite confirmation state for failed downloads where the target file already exists.
+_overwrite_download_requests = {}
+
 # Runtime settings for collecting consecutive single-file messages into one batch.
 _SINGLE_FILE_GROUP_MIN_DELAY = 0.1
 _SINGLE_FILE_GROUP_MAX_DELAY = 60.0
@@ -106,6 +110,7 @@ _INTERACTION_STATE_BUCKETS = {
     "media_group_file_selections": _media_group_file_selections,
     "status_cancel_selections": _status_cancel_selections,
 }
+_FILE_ALREADY_EXISTS_TEXT = "file already exists in downloads folder"
 
 
 def _monotonic_now() -> float:
@@ -294,6 +299,13 @@ def _prune_stale_interaction_state() -> None:
     _prune_mapping_by_age("media_group_confirmations", _media_group_confirmations, now)
     _prune_mapping_by_age("media_group_failed_files", _media_group_failed_files, now)
     _prune_mapping_by_age("status_cancel_selections", _status_cancel_selections, now)
+    for token, value in list(_overwrite_download_requests.items()):
+        if not isinstance(value, dict):
+            _overwrite_download_requests.pop(token, None)
+            continue
+        created_at = value.get("created_at")
+        if created_at is not None and now - created_at > _MEDIA_GROUP_SESSION_TTL:
+            _overwrite_download_requests.pop(token, None)
 
     state = _load_interaction_state_file()
     changed = False
@@ -440,6 +452,41 @@ def _remove_download_cancel_token(file_id: str) -> None:
         if mapped_file_id == file_id:
             _download_cancel_tokens.pop(token, None)
             return
+
+
+def _is_file_already_exists_error(error: BaseException) -> bool:
+    return _FILE_ALREADY_EXISTS_TEXT in str(error).lower()
+
+
+def _resolve_download_target_path(file_name: str) -> str:
+    download_root = os.path.abspath(DOWNLOAD_TO_DIR)
+    target_path = os.path.abspath(os.path.join(download_root, file_name))
+    if os.path.commonpath([download_root, target_path]) != download_root:
+        raise ValueError("Resolved download target is outside the download directory.")
+    return target_path
+
+
+def _remove_existing_download_target(file_name: str) -> str:
+    target_path = _resolve_download_target_path(file_name)
+    if not os.path.isfile(target_path):
+        raise FileNotFoundError("Existing download target was not found.")
+    os.remove(target_path)
+    return target_path
+
+
+def _create_overwrite_download_request(
+    file_id: str,
+    file_name: str,
+    file_size: int,
+) -> str:
+    token = secrets.token_urlsafe(8)
+    _overwrite_download_requests[token] = {
+        "file_id": file_id,
+        "file_name": file_name,
+        "file_size": int(file_size or 0),
+        "created_at": _monotonic_now(),
+    }
+    return token
 
 
 async def _cancel_download(file_id: str) -> bool:
@@ -1261,7 +1308,8 @@ async def _download_single_file(
     status_message: Message = None,
     batch_progress: Optional[Tuple[int, int]] = None,
     suppress_success_status: bool = False,
-) -> bool:
+    overwrite_existing: bool = False,
+) -> Optional[bool]:
     """
     下载单个文件
     """
@@ -1332,7 +1380,39 @@ async def _download_single_file(
                 batch_progress,
             )
         )
-        new_file = await get_file(context.bot, download_file)
+        try:
+            new_file = await get_file(context.bot, download_file)
+        except Exception as download_error:
+            if not overwrite_existing or not _is_file_already_exists_error(download_error):
+                raise
+
+            try:
+                removed_path = await asyncio.to_thread(
+                    _remove_existing_download_target,
+                    file_name,
+                )
+                logger.info(
+                    "Removed existing download target during overwrite retry: %s",
+                    removed_path,
+                )
+            except FileNotFoundError:
+                logger.warning(
+                    "Overwrite retry was requested but target file was already absent: %s",
+                    file_name,
+                )
+
+            await _update_download_status(
+                status_message,
+                message,
+                (
+                    "*Existing file removed*\n\n"
+                    f"> *File:* `{_escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)}`\n"
+                    "> *Status:* `Retrying download`"
+                ),
+                parse_mode="Markdown",
+                reply_markup=cancel_reply_markup,
+            )
+            new_file = await get_file(context.bot, download_file)
         download_completed = True
     except asyncio.CancelledError:
         logger.info(f"Download cancelled for file: {file_name}")
@@ -1357,13 +1437,46 @@ async def _download_single_file(
             )
         return False
     except Exception as e:
-        logger.error(f"Error downloading file: {e}")
-        traceback.print_exc()
+        expected_existing_file_error = _is_file_already_exists_error(e)
+        if expected_existing_file_error:
+            logger.info(
+                "Download requires overwrite confirmation for existing file: %s",
+                file_name,
+            )
+        else:
+            logger.error("Error downloading file %s: %s", file_name, e, exc_info=True)
         downloading_files.pop(file_id, None)
         _download_tasks.pop(file_id, None)
         _download_cancel_tokens.pop(cancel_token, None)
         error_text = escape_md(str(e))
         safe_file_name = _escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)
+
+        if expected_existing_file_error:
+            overwrite_token = _create_overwrite_download_request(file_id, file_name, file_size)
+            await _update_download_status(
+                status_message,
+                message,
+                (
+                    "*Download blocked*\n\n"
+                    f"> *File:* `{safe_file_name}`\n"
+                    f"> *Reason:* `{error_text}`\n\n"
+                    "A file with the same name already exists in the download folder. "
+                    "Choose whether to delete the existing file and download again."
+                ),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "Overwrite and download",
+                                callback_data=f"ow_dl_{overwrite_token}",
+                            ),
+                            InlineKeyboardButton("Cancel", callback_data="cancel_retry"),
+                        ]
+                    ]
+                ),
+            )
+            return None
         
         # 提供重试按钮，使用简单的文本格式避免Markdown解析问题
         retry_message = (
@@ -1382,6 +1495,7 @@ async def _download_single_file(
             status_message,
             message,
             retry_message,
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -1742,6 +1856,56 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await query.edit_message_text("Cancel failed: download task not found or already finished.")
         return
 
+    if query.data.startswith("ow_dl_"):
+        overwrite_token = query.data[len("ow_dl_"):]
+        request = _overwrite_download_requests.pop(overwrite_token, None)
+        if not request:
+            await query.edit_message_text("Overwrite request expired or already handled.")
+            return
+
+        original_message = query.message.reply_to_message if query.message else None
+        if not original_message:
+            await query.edit_message_text(
+                "Overwrite failed: original Telegram file message is no longer available."
+            )
+            return
+
+        file_name = str(request["file_name"])
+        file_id = str(request["file_id"])
+        file_size = int(request.get("file_size") or 0)
+        try:
+            removed_path = await asyncio.to_thread(_remove_existing_download_target, file_name)
+            logger.info("Removed existing download target before overwrite: %s", removed_path)
+        except Exception as error:
+            await query.edit_message_text(
+                (
+                    "*Overwrite failed*\n\n"
+                    f"> *File:* `{_escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)}`\n"
+                    f"> *Reason:* `{escape_md(str(error))}`"
+                ),
+                parse_mode="Markdown",
+            )
+            return
+
+        await query.edit_message_text(
+            (
+                "*Existing file removed*\n\n"
+                f"> *File:* `{_escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)}`\n"
+                "> *Status:* `Restarting download`"
+            ),
+            parse_mode="Markdown",
+        )
+        await _download_single_file(
+            file_id,
+            file_name,
+            file_size,
+            original_message,
+            context,
+            status_message=query.message,
+            overwrite_existing=True,
+        )
+        return
+
     # 处理 /status 取消下载相关回调
     if query.data.startswith("stc_tog_"):
         parts = query.data[len("stc_tog_"):]
@@ -1890,6 +2054,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 batch_progress=(success_count, len(files_info)),
                 suppress_success_status=True,
             )
+            if success is None:
+                return
             if success:
                 success_count += 1
             else:
@@ -2047,6 +2213,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 batch_progress=(success_count, len(selected_files)),
                 suppress_success_status=True,
             )
+            if success is None:
+                return
             if success:
                 success_count += 1
             else:
@@ -2179,6 +2347,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     batch_progress=(success_count, len(failed_files)),
                     suppress_success_status=True,
                 )
+                if success is None:
+                    return
                 if success:
                     success_count += 1
                 else:
