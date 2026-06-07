@@ -21,6 +21,7 @@ class RuntimeSettingsTests(unittest.TestCase):
             download_status_update_interval=5.0,
             download_progress_poll_interval=1.0,
             admin_progress_poll_interval=0.5,
+            language="en",
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -35,6 +36,7 @@ class RuntimeSettingsTests(unittest.TestCase):
                 download_status_update_interval=8.0,
                 download_progress_poll_interval=2.0,
                 admin_progress_poll_interval=0.25,
+                language="zh-CN",
             )
             store.save(updated)
 
@@ -47,6 +49,7 @@ class RuntimeSettingsTests(unittest.TestCase):
                     "download_status_update_interval": 8.0,
                     "download_progress_poll_interval": 2.0,
                     "admin_progress_poll_interval": 0.25,
+                    "language": "zh-CN",
                     "single_file_group_delay": 2.5,
                     "single_file_group_enabled": True,
                 },
@@ -60,6 +63,7 @@ class RuntimeSettingsTests(unittest.TestCase):
             download_status_update_interval=5.0,
             download_progress_poll_interval=1.0,
             admin_progress_poll_interval=0.5,
+            language="en",
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -72,6 +76,7 @@ class RuntimeSettingsTests(unittest.TestCase):
                         "download_status_update_interval": -1,
                         "download_progress_poll_interval": 0,
                         "admin_progress_poll_interval": "bad",
+                        "language": "xx",
                     },
                     settings_file,
                 )
@@ -83,6 +88,7 @@ class RuntimeSettingsTests(unittest.TestCase):
             self.assertEqual(settings.download_status_update_interval, 5.0)
             self.assertEqual(settings.download_progress_poll_interval, 1.0)
             self.assertEqual(settings.admin_progress_poll_interval, 0.5)
+            self.assertEqual(settings.language, "en")
 
 
 if __name__ == "__main__":

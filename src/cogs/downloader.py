@@ -34,8 +34,10 @@ from ..utils import (
     env,
     get_file,
     get_file_download_progress,
+    get_language,
     runtime_settings,
     save_runtime_settings,
+    t,
 )
 from ..utils.media_group import get_media_info, process_media_group
 
@@ -364,6 +366,16 @@ def _escape_display_text(text: Any, limit: int) -> str:
     return escape_md(_truncate_text(text, limit))
 
 
+def _display_status(status: str) -> str:
+    key = f"status.value.{str(status).strip().lower()}"
+    translated = t(key)
+    return status if translated == key else translated
+
+
+def _display_eta(value: str) -> str:
+    return t("download.unknown_error") if value == "Unknown" else value
+
+
 def _limit_telegram_message(text: str, limit: int = _TELEGRAM_MESSAGE_SAFE_LIMIT) -> str:
     limit = min(limit, _TELEGRAM_MESSAGE_LIMIT)
     if not isinstance(text, str):
@@ -435,6 +447,7 @@ def _build_current_runtime_settings() -> RuntimeSettings:
         download_status_update_interval=_download_status_update_interval,
         download_progress_poll_interval=_download_progress_poll_interval,
         admin_progress_poll_interval=runtime_settings.admin_progress_poll_interval,
+        language=get_language(),
     )
 
 
@@ -537,22 +550,22 @@ def _build_status_cancel_keyboard(status_session_id: str, file_ids: List[str], s
     if total_pages > 1:
         nav_row = []
         if page > 0:
-            nav_row.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"stc_page_{status_session_id}_{page - 1}"))
+            nav_row.append(InlineKeyboardButton(t("button.prev"), callback_data=f"stc_page_{status_session_id}_{page - 1}"))
         if page < total_pages - 1:
-            nav_row.append(InlineKeyboardButton("Next ➡️", callback_data=f"stc_page_{status_session_id}_{page + 1}"))
+            nav_row.append(InlineKeyboardButton(t("button.next"), callback_data=f"stc_page_{status_session_id}_{page + 1}"))
         keyboard.append(nav_row)
 
     active_indexes = [i for i, file_id in enumerate(file_ids) if file_id in downloading_files]
     all_selected = bool(active_indexes) and all(selected[i] for i in active_indexes)
     keyboard.append([
         InlineKeyboardButton(
-            "❌ Deselect All" if all_selected else "✅ Select All",
+            t("button.deselect_all") if all_selected else t("button.select_all"),
             callback_data=f"stc_dsall_{status_session_id}" if all_selected else f"stc_sall_{status_session_id}",
         )
     ])
     keyboard.append([
-        InlineKeyboardButton("🛑 Cancel Selected", callback_data=f"stc_conf_{status_session_id}"),
-        InlineKeyboardButton("Close", callback_data=f"stc_close_{status_session_id}"),
+        InlineKeyboardButton(t("button.cancel_selected"), callback_data=f"stc_conf_{status_session_id}"),
+        InlineKeyboardButton(t("button.close"), callback_data=f"stc_close_{status_session_id}"),
     ])
     return keyboard
 
@@ -578,25 +591,28 @@ def _build_download_status_text(
     download_file: DownloadFile,
     batch_progress: Optional[Tuple[int, int]] = None,
 ) -> str:
-    title = "*Queued file...*" if download_file.queued else "*Downloading file...*"
+    title = t("download.queued_title") if download_file.queued else t("download.title")
     batch_line = ""
     if batch_progress:
         completed_files, total_files = batch_progress
-        batch_line = (
-            f"> *Downloaded files:* `{completed_files}/{total_files}`\n"
+        batch_line = t(
+            "download.status_downloaded_files",
+            completed_files=completed_files,
+            total_files=total_files,
         )
-    return (
-        f"{title}\n\n"
-        f"> *File:* `{_escape_display_text(download_file.file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)}`\n"
-        f"> *Size:* `{escape_md(download_file.file_size_mb)}`\n"
-        f"> *Status:* `{escape_md(download_file.status)}`\n"
-        f"{batch_line}"
-        f"> *Downloaded:* `{escape_md(download_file.downloaded_size)}`\n"
-        f"> *Progress:* `{escape_md(download_file.download_progress)}`\n"
-        f"> *Speed:* `{escape_md(download_file.download_speed)}`\n"
-        f"> *ETA:* `{escape_md(download_file.remaining_download_time)}`\n"
-        f"> *Duration:* `{escape_md(download_file.current_download_duration)}`\n"
-        f"> *Retries:* `{download_file.download_retries}`"
+    return t(
+        "download.status_text",
+        title=title,
+        file_name=_escape_display_text(download_file.file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT),
+        file_size=escape_md(download_file.file_size_mb),
+        status=escape_md(_display_status(download_file.status)),
+        batch_line=batch_line,
+        downloaded=escape_md(download_file.downloaded_size),
+        progress=escape_md(download_file.download_progress),
+        speed=escape_md(download_file.download_speed),
+        eta=escape_md(_display_eta(download_file.remaining_download_time)),
+        duration=escape_md(download_file.current_download_duration),
+        retries=download_file.download_retries,
     )
 
 
@@ -630,34 +646,42 @@ def _build_status_message_text(
         if i < len(selected) and selected[i] and file_id in downloading_files
     )
 
-    lines = ["*Downloading files status:*\n"]
+    lines = [t("status.title")]
     for original_index, file_id in page_entries:
         file = downloading_files[file_id]
         mark = ""
         if selected:
-            mark = "鉁? " if original_index < len(selected) and selected[original_index] else "鉂? "
+            mark = "✅ " if original_index < len(selected) and selected[original_index] else "❌ "
         safe_file_name = _escape_display_text(
             file.file_name,
             _STATUS_FILE_NAME_DISPLAY_LIMIT,
         )
-        safe_status = escape_md(file.status)
+        safe_status = escape_md(_display_status(file.status))
         lines.append(
-            f"> {mark}{original_index + 1}. 馃搫 *File name:* `{safe_file_name}`\n"
-            f"> 馃捑 *File size:* `{escape_md(file.file_size_mb)}`\n"
-            f"> *Downloaded:* `{escape_md(file.downloaded_size)}`\n"
-            f"> *Progress:* `{escape_md(file.download_progress)}`\n"
-            f"> *Speed:* `{escape_md(file.download_speed)}`\n"
-            f"> 鈴?*Start time:* `{escape_md(file.start_datetime)}`\n"
-            f"> 鈴?*Duration:* `{escape_md(file.current_download_duration)}`\n"
-            f"> 馃敾 *Retries:* `{file.download_retries}`\n"
-            f"> 馃攧 *Status:* `{safe_status}`\n"
+            t(
+                "status.file_line",
+                mark=mark,
+                index=original_index + 1,
+                file_name=safe_file_name,
+                file_size=escape_md(file.file_size_mb),
+                downloaded=escape_md(file.downloaded_size),
+                progress=escape_md(file.download_progress),
+                speed=escape_md(file.download_speed),
+                start_time=escape_md(file.start_datetime),
+                duration=escape_md(file.current_download_duration),
+                retries=file.download_retries,
+                status=safe_status,
+            )
         )
 
     lines.append(
-        f"\n> 馃洃 *Selected to cancel:* `{selected_count}/{active_count}`\n"
-        f"> 馃搫 *Page:* `{page + 1}/{total_pages}`\n\n"
-        "Select files below, then press *Cancel Selected* to cancel downloads.\n"
-        "鉂?means not selected, 鉁?means selected."
+        t(
+            "status.footer",
+            selected_count=selected_count,
+            active_count=active_count,
+            page=page + 1,
+            total_pages=total_pages,
+        )
     )
     return _limit_telegram_message("\n".join(lines)), active_count, selected_count, total_pages, page
 
@@ -787,7 +811,7 @@ def _find_download_progress_size(
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _prune_stale_interaction_state()
     if not downloading_files:
-        await update.message.reply_text("No files are being downloaded at the moment.")
+        await update.message.reply_text(t("status.empty"))
         return
 
     files_items = list(downloading_files.items())
@@ -898,10 +922,10 @@ async def _send_single_file_confirmation(
     safe_file_name = _escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)
     safe_file_size = escape_md(DownloadFile.convert_size(file_size))
 
-    response_message = (
-        f"Are you sure you want to download the file?\n\n"
-        f"> 📄 *File name:* `{safe_file_name}`\n"
-        f"> 💾 *File size:* `{safe_file_size}`\n"
+    response_message = t(
+        "download.confirm_single",
+        file_name=safe_file_name,
+        file_size=safe_file_size,
     )
 
     await context.bot.send_message(
@@ -912,8 +936,8 @@ async def _send_single_file_confirmation(
         reply_markup=InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("Yes", callback_data="yes"),
-                    InlineKeyboardButton("No", callback_data="no"),
+                    InlineKeyboardButton(t("button.yes"), callback_data="yes"),
+                    InlineKeyboardButton(t("button.no"), callback_data="no"),
                 ]
             ]
         ),
@@ -1032,20 +1056,17 @@ async def single_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     global _single_file_grouping_delay, _single_file_grouping_enabled
 
     args = context.args or []
-    usage = (
-        "Usage:\n"
-        "/single_group on [seconds] - enable grouped single-file forwarding\n"
-        "/single_group off - disable it\n"
-        "/single_group <seconds> - set delay and enable it\n"
-        "/single_group status - show current setting"
-    )
+    usage = t("single_group.usage")
 
     if not args or args[0].lower() == "status":
-        state = "ON" if _single_file_grouping_enabled else "OFF"
+        state = t("common.on") if _single_file_grouping_enabled else t("common.off")
         await update.message.reply_text(
-            f"Single-file grouping is {state}.\n"
-            f"Delay: {_single_file_grouping_delay:.2f}s\n\n"
-            f"{usage}"
+            t(
+                "single_group.status",
+                state=state,
+                delay=_single_file_grouping_delay,
+                usage=usage,
+            )
         )
         return
 
@@ -1061,10 +1082,10 @@ async def single_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         _single_file_grouping_enabled = False
         saved = _save_current_runtime_settings()
         flushed = await _flush_pending_single_file_groups(context)
-        suffix = f"\nFlushed {flushed} pending file(s)." if flushed else ""
+        suffix = t("single_group.flushed", count=flushed) if flushed else ""
         if not saved:
-            suffix += "\nWarning: runtime settings were not saved."
-        await update.message.reply_text(f"Single-file grouping is OFF.{suffix}")
+            suffix += t("single_group.saved_warning")
+        await update.message.reply_text(t("single_group.off", suffix=suffix))
         return
     else:
         delay_arg = args[0]
@@ -1074,7 +1095,7 @@ async def single_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         delay = _parse_single_file_group_delay(delay_arg)
         if delay is None:
             await update.message.reply_text(
-                "Invalid delay. Use a positive number of seconds.\n\n" + usage
+                t("single_group.invalid_delay", usage=usage)
             )
             return
         _single_file_grouping_delay = delay
@@ -1082,9 +1103,9 @@ async def single_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if enable_after_parse:
         _single_file_grouping_enabled = True
 
-    suffix = "" if _save_current_runtime_settings() else "\nWarning: runtime settings were not saved."
+    suffix = "" if _save_current_runtime_settings() else t("single_group.saved_warning")
     await update.message.reply_text(
-        f"Single-file grouping is ON.\nDelay: {_single_file_grouping_delay:.2f}s{suffix}"
+        t("single_group.on", delay=_single_file_grouping_delay, suffix=suffix)
     )
 
 
@@ -1115,10 +1136,11 @@ async def _handle_media_group_download(
     
     files_text = "\n".join(files_list)
     
-    response_message = (
-        f"Are you sure you want to download {len(files_info)} files?\n\n"
-        f"{files_text}\n\n"
-        f"> 💾 *Total size:* `{total_size:.2f} MB`"
+    response_message = t(
+        "download.confirm_files",
+        count=len(files_info),
+        files_text=files_text,
+        total_size=total_size,
     )
     
     # 存储媒体组信息用于后续处理
@@ -1139,11 +1161,11 @@ async def _handle_media_group_download(
         reply_markup=InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("Yes", callback_data=f"media_group_yes_{media_group_id}"),
-                    InlineKeyboardButton("No", callback_data=f"media_group_no_{media_group_id}"),
+                    InlineKeyboardButton(t("button.yes"), callback_data=f"media_group_yes_{media_group_id}"),
+                    InlineKeyboardButton(t("button.no"), callback_data=f"media_group_no_{media_group_id}"),
                 ],
                 [
-                    InlineKeyboardButton("📱 Select Files", callback_data=f"mg_select_{media_group_id}"),
+                    InlineKeyboardButton(t("button.select_files"), callback_data=f"mg_select_{media_group_id}"),
                 ]
             ]
         ),
@@ -1334,7 +1356,7 @@ async def _download_single_file(
         cancel_token = str(abs(hash(file_id)))[-16:]
     _download_cancel_tokens[cancel_token] = file_id
     cancel_reply_markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🛑 Cancel Download", callback_data=f"dl_cancel_{cancel_token}")]]
+        [[InlineKeyboardButton(t("button.cancel_download"), callback_data=f"dl_cancel_{cancel_token}")]]
     )
 
     if _download_semaphore.locked():
@@ -1405,9 +1427,11 @@ async def _download_single_file(
                 status_message,
                 message,
                 (
-                    "*Existing file removed*\n\n"
-                    f"> *File:* `{_escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)}`\n"
-                    "> *Status:* `Retrying download`"
+                    t(
+                        "download.existing_file_removed",
+                        file_name=_escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT),
+                        status="Retrying download",
+                    )
                 ),
                 parse_mode="Markdown",
                 reply_markup=cancel_reply_markup,
@@ -1424,13 +1448,16 @@ async def _download_single_file(
             await _update_download_status(
                 status_message,
                 message,
-                f"🛑 *Download cancelled*\n\n> 📄 *File:* `{_escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)}`",
+                t(
+                    "download.cancelled_status",
+                    file_name=_escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT),
+                ),
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [
-                            InlineKeyboardButton("🔄 Retry", callback_data=f"retry_{short_file_id}"),
-                            InlineKeyboardButton("❌ Close", callback_data="cancel_retry"),
+                            InlineKeyboardButton(t("button.retry"), callback_data=f"retry_{short_file_id}"),
+                            InlineKeyboardButton(t("button.close"), callback_data="cancel_retry"),
                         ]
                     ]
                 ),
@@ -1456,22 +1483,20 @@ async def _download_single_file(
             await _update_download_status(
                 status_message,
                 message,
-                (
-                    "*Download blocked*\n\n"
-                    f"> *File:* `{safe_file_name}`\n"
-                    f"> *Reason:* `{error_text}`\n\n"
-                    "A file with the same name already exists in the download folder. "
-                    "Choose whether to delete the existing file and download again."
+                t(
+                    "download.blocked_existing_file",
+                    file_name=safe_file_name,
+                    reason=error_text,
                 ),
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [
                             InlineKeyboardButton(
-                                "Overwrite and download",
+                                t("button.overwrite_download"),
                                 callback_data=f"ow_dl_{overwrite_token}",
                             ),
-                            InlineKeyboardButton("Cancel", callback_data="cancel_retry"),
+                            InlineKeyboardButton(t("button.cancel"), callback_data="cancel_retry"),
                         ]
                     ]
                 ),
@@ -1479,13 +1504,12 @@ async def _download_single_file(
             return None
         
         # 提供重试按钮，使用简单的文本格式避免Markdown解析问题
-        retry_message = (
-            f"⛔ Error downloading file\n"
-            f"File: {safe_file_name}\n"
-            f"Error: {error_text}\n\n"
-            f"🔄 Retry information:\n"
-            f"Attempts: {download_file.download_retries + 1}\n"
-            f"Last error: {escape_md(download_file.last_error or 'Unknown')}"
+        retry_message = t(
+            "download.error_retry",
+            file_name=safe_file_name,
+            error=error_text,
+            attempts=download_file.download_retries + 1,
+            last_error=escape_md(download_file.last_error or t("download.unknown_error")),
         )
         
         # 使用文件ID的最后8位作为回调数据，避免超过Telegram限制
@@ -1499,8 +1523,8 @@ async def _download_single_file(
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
-                        InlineKeyboardButton("🔄 Retry", callback_data=f"retry_{short_file_id}"),
-                        InlineKeyboardButton("❌ Cancel", callback_data="cancel_retry"),
+                        InlineKeyboardButton(t("button.retry"), callback_data=f"retry_{short_file_id}"),
+                        InlineKeyboardButton(t("button.cancel"), callback_data="cancel_retry"),
                     ]
                 ]
             ),
@@ -1530,7 +1554,7 @@ async def _download_single_file(
         await _update_download_status(
             status_message,
             message,
-            escape_md("Internal error: Bot API returned an empty file path."),
+            escape_md(t("download.internal_empty_path")),
             parse_mode="Markdown",
         )
         release_download_slot()
@@ -1562,7 +1586,7 @@ async def _download_single_file(
             await _update_download_status(
                 status_message,
                 message,
-                escape_md("⛔ Internal error: Could not locate downloaded file on disk."),
+                escape_md(t("download.internal_locate_failed")),
                 parse_mode="Markdown",
             )
             release_download_slot()
@@ -1589,7 +1613,12 @@ async def _download_single_file(
             await _update_download_status(
                 status_message,
                 message,
-                f"⛔ Error moving file\n> Source: `{safe_target}`\n> Target: `{safe_move_to}`\nErrors:\n```\n{move_error_text}```",
+                t(
+                    "download.move_error",
+                    source=safe_target,
+                    target=safe_move_to,
+                    errors=move_error_text,
+                ),
                 parse_mode="Markdown",
             )
             _download_tasks.pop(file_id, None)
@@ -1608,11 +1637,11 @@ async def _download_single_file(
             logger.warning(f"Failed to change permissions: {e}")
 
     safe_file_name_final = _escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)
-    response_message = (
-        f"✅ File downloaded successfully.\n\n"
-        f"> 📄 *File:* `{safe_file_name_final}`\n"
-        f"> 💾 *Size:* `{escape_md(download_file.file_size_mb)}`\n"
-        f"> ⏱ *Total Duration:* `{escape_md(download_file.total_duration)}`"
+    response_message = t(
+        "download.success",
+        file_name=safe_file_name_final,
+        file_size=escape_md(download_file.file_size_mb),
+        duration=escape_md(download_file.total_duration),
     )
     if not suppress_success_status:
         await _update_download_status(
@@ -1634,7 +1663,7 @@ async def _show_file_selection(
     支持分页：每页最多 8 个文件按钮（避免 Telegram 消息按钮过多）
     """
     if not _get_interaction_state("media_group_confirmations", media_group_id):
-        await query.edit_message_text("⚠️ Media group session expired.")
+        await query.edit_message_text(t("download.media_group_session_expired"))
         return
     
     media_group_info = _get_interaction_state("media_group_confirmations", media_group_id)
@@ -1677,10 +1706,10 @@ async def _show_file_selection(
     ) / 1024 / 1024
     
     message_text = (
-        f"📱 *Select files to download*\n\n"
+        f"📱 *{t('download.select_files_title')}*\n\n"
         f"{files_text}\n\n"
-        f"> 💾 *Selected size:* `{selected_size:.2f} MB`\n"
-        f"> 📁 *Selected files:* `{selected_count}/{len(files_info)}`"
+        f"> 💾 *{t('download.selected_size')}:* `{selected_size:.2f} MB`\n"
+        f"> 📁 *{t('download.selected_files')}:* `{selected_count}/{len(files_info)}`"
     )
     
     if total_pages > 1:
@@ -1707,12 +1736,12 @@ async def _show_file_selection(
         nav_row = []
         if page > 0:
             nav_row.append(InlineKeyboardButton(
-                "⬅️ Prev",
+                t("button.prev"),
                 callback_data=f"mgs_page_{media_group_id}_{page - 1}"
             ))
         if page < total_pages - 1:
             nav_row.append(InlineKeyboardButton(
-                "Next ➡️",
+                t("button.next"),
                 callback_data=f"mgs_page_{media_group_id}_{page + 1}"
             ))
         keyboard.append(nav_row)
@@ -1721,19 +1750,19 @@ async def _show_file_selection(
     all_selected = all(selections)
     if all_selected:
         keyboard.append([InlineKeyboardButton(
-            "❌ Deselect All",
+            t("button.deselect_all"),
             callback_data=f"mgs_dsall_{media_group_id}"
         )])
     else:
         keyboard.append([InlineKeyboardButton(
-            "✅ Select All",
+            t("button.select_all"),
             callback_data=f"mgs_sall_{media_group_id}"
         )])
     
     # 确认/取消按钮
     keyboard.append([
-        InlineKeyboardButton("✅ Confirm", callback_data=f"mgs_conf_{media_group_id}"),
-        InlineKeyboardButton("❌ Cancel", callback_data=f"mgs_cancel_{media_group_id}"),
+        InlineKeyboardButton(t("button.confirm"), callback_data=f"mgs_conf_{media_group_id}"),
+        InlineKeyboardButton(t("button.cancel"), callback_data=f"mgs_cancel_{media_group_id}"),
     ])
     
     await query.edit_message_text(
@@ -1749,7 +1778,7 @@ async def _show_status_cancel_selection(query, status_session_id: str):
     """
     session = _get_interaction_state("status_cancel_selections", status_session_id)
     if not session:
-        await query.edit_message_text("Status selection session expired.")
+        await query.edit_message_text(t("status.session_expired"))
         return
 
     file_ids = session['file_ids']
@@ -1765,7 +1794,7 @@ async def _show_status_cancel_selection(query, status_session_id: str):
 
     if active_count == 0:
         _pop_interaction_state("status_cancel_selections", status_session_id)
-        await query.edit_message_text("No files are being downloaded at the moment.")
+        await query.edit_message_text(t("status.empty"))
         return
 
     keyboard = _build_status_cancel_keyboard(status_session_id, file_ids, selected)
@@ -1801,7 +1830,7 @@ async def _show_status_cancel_selection(query, status_session_id: str):
 
     if active_count == 0:
         _pop_interaction_state("status_cancel_selections", status_session_id)
-        await query.edit_message_text("No files are being downloaded at the moment.")
+        await query.edit_message_text(t("status.empty"))
         return
 
     selected_count = sum(1 for i, s in enumerate(selected) if s and i < len(file_ids) and file_ids[i] in downloading_files)
@@ -1838,7 +1867,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cancel_token = query.data[len("dl_cancel_"):]
         file_id = _download_cancel_tokens.get(cancel_token)
         if not file_id:
-            await query.edit_message_text("Cancel failed: download task not found or already finished.")
+            await query.edit_message_text(t("download.cancel_failed_missing"))
             return
 
         file = downloading_files.get(file_id)
@@ -1846,28 +1875,26 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if cancel_started:
             safe_file_name = _escape_display_text(file.file_name if file else file_id, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)
             await query.edit_message_text(
-                f"🛑 *Cancelling download...*\n\n> 📄 *File:* `{safe_file_name}`",
+                t("download.cancelling", file_name=safe_file_name),
                 parse_mode="Markdown",
             )
         else:
             downloading_files.pop(file_id, None)
             _download_tasks.pop(file_id, None)
             _download_cancel_tokens.pop(cancel_token, None)
-            await query.edit_message_text("Cancel failed: download task not found or already finished.")
+            await query.edit_message_text(t("download.cancel_failed_missing"))
         return
 
     if query.data.startswith("ow_dl_"):
         overwrite_token = query.data[len("ow_dl_"):]
         request = _overwrite_download_requests.pop(overwrite_token, None)
         if not request:
-            await query.edit_message_text("Overwrite request expired or already handled.")
+            await query.edit_message_text(t("download.overwrite_request_expired"))
             return
 
         original_message = query.message.reply_to_message if query.message else None
         if not original_message:
-            await query.edit_message_text(
-                "Overwrite failed: original Telegram file message is no longer available."
-            )
+            await query.edit_message_text(t("download.overwrite_missing_original"))
             return
 
         file_name = str(request["file_name"])
@@ -1878,20 +1905,20 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.info("Removed existing download target before overwrite: %s", removed_path)
         except Exception as error:
             await query.edit_message_text(
-                (
-                    "*Overwrite failed*\n\n"
-                    f"> *File:* `{_escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)}`\n"
-                    f"> *Reason:* `{escape_md(str(error))}`"
+                t(
+                    "download.overwrite_failed",
+                    file_name=_escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT),
+                    reason=escape_md(str(error)),
                 ),
                 parse_mode="Markdown",
             )
             return
 
         await query.edit_message_text(
-            (
-                "*Existing file removed*\n\n"
-                f"> *File:* `{_escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT)}`\n"
-                "> *Status:* `Restarting download`"
+            t(
+                "download.existing_file_removed",
+                file_name=_escape_display_text(file_name, _DOWNLOAD_FILE_NAME_DISPLAY_LIMIT),
+                status="Restarting download",
             ),
             parse_mode="Markdown",
         )
@@ -1950,7 +1977,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         status_session_id = query.data[len("stc_conf_"):]
         session = _pop_interaction_state("status_cancel_selections", status_session_id)
         if not session:
-            await query.edit_message_text("Status selection session expired.")
+            await query.edit_message_text(t("status.session_expired"))
             return
 
         selected_file_ids = [
@@ -1960,7 +1987,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
 
         if not selected_file_ids:
-            await query.answer("⚠️ Please select at least one downloading file!", show_alert=True)
+            await query.answer(t("download.select_at_least_one_downloading"), show_alert=True)
             _set_interaction_state("status_cancel_selections", status_session_id, session)
             return
 
@@ -1984,11 +2011,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     _download_cancel_tokens.pop(token_to_remove, None)
                 missing_count += 1
 
-        lines = ["🛑 *Cancel request sent*\n"]
+        lines = [t("download.cancel_request_sent")]
         for name in cancelled_names:
             lines.append(f"> 📄 `{_escape_display_text(name, _STATUS_FILE_NAME_DISPLAY_LIMIT)}`")
         if missing_count:
-            lines.append(f"\n> ⚠️ Missing task records: `{missing_count}`")
+            lines.append(t("download.missing_task_records", count=missing_count))
 
         await query.edit_message_text(
             _limit_telegram_message("\n".join(lines)),
@@ -2007,7 +2034,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         media_group_id = query.data.split("_", 3)[3]
         
         if not _get_interaction_state("media_group_confirmations", media_group_id):
-            await query.edit_message_text("Media group not found or already processed.")
+            await query.edit_message_text(t("download.media_group_missing"))
             return
         
         media_group_info = _pop_interaction_state("media_group_confirmations", media_group_id)
@@ -2017,14 +2044,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         if query.data.startswith("media_group_no_"):
             logger.info(f"Media group download cancelled: {media_group_id}")
-            await query.edit_message_text("Download cancelled.")
+            await query.edit_message_text(t("download.cancelled"))
             return
         
         await query.edit_message_text(
-            f"⬇️ *Batch download started*\n\n"
-            f"> 📁 *Total files:* `{len(files_info)}`\n"
-            f"> ✅ *Successful:* `0`\n"
-            f"> ❌ *Failed:* `0`",
+            t("download.batch_started", total_count=len(files_info)),
             parse_mode="Markdown",
         )
         
@@ -2038,10 +2062,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         for index, file_state in enumerate(files_info, start=1):
             file_id, file_name, file_size = _file_state_info(file_state)
             await query.edit_message_text(
-                f"⬇️ *Batch download in progress*\n\n"
-                f"> 📄 *Current:* `{index}/{len(files_info)}` `{_escape_display_text(file_name, _MEDIA_GROUP_FILE_NAME_DISPLAY_LIMIT)}`\n"
-                f"> ✅ *Successful:* `{success_count}`\n"
-                f"> ❌ *Failed:* `{fail_count}`",
+                t(
+                    "download.batch_in_progress",
+                    index=index,
+                    total_count=len(files_info),
+                    file_name=_escape_display_text(file_name, _MEDIA_GROUP_FILE_NAME_DISPLAY_LIMIT),
+                    success_count=success_count,
+                    fail_count=fail_count,
+                ),
                 parse_mode="Markdown",
             )
             success = await _download_single_file(
@@ -2065,24 +2093,24 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await asyncio.sleep(0.5)
         
         # 发送总结消息
-        summary_message = (
-            f"📊 *Batch download completed*\n\n"
-            f"> ✅ Successful: `{success_count}`\n"
-            f"> ❌ Failed: `{fail_count}`\n"
-            f"> 📁 Total: `{len(files_info)}`"
+        summary_message = t(
+            "download.batch_completed",
+            success_count=success_count,
+            fail_count=fail_count,
+            total_count=len(files_info),
         )
         
         # 如果有失败的文件，添加重试按钮
         if failed_files:
-            summary_message += "\n\n🔄 *Failed files can be retried individually*"
+            summary_message += t("download.failed_files_retryable")
             await query.edit_message_text(
                 summary_message, 
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [
-                            InlineKeyboardButton("🔄 Retry All Failed", callback_data=f"retry_media_group_{media_group_id}"),
-                            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_retry_media_group_{media_group_id}"),
+                            InlineKeyboardButton(t("button.retry_all_failed"), callback_data=f"retry_media_group_{media_group_id}"),
+                            InlineKeyboardButton(t("button.cancel"), callback_data=f"cancel_retry_media_group_{media_group_id}"),
                         ]
                     ]
                 ),
@@ -2163,13 +2191,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         media_group_info = _get_interaction_state("media_group_confirmations", media_group_id)
         if not media_group_info:
-            await query.edit_message_text("⚠️ Media group session expired.")
+            await query.edit_message_text(t("download.media_group_session_expired"))
             return
         
         selection_state = _get_interaction_state("media_group_file_selections", media_group_id) or {}
         selections = selection_state.get("selected", [])
         if not any(selections):
-            await query.answer("⚠️ Please select at least one file!", show_alert=True)
+            await query.answer(t("download.select_at_least_one_file"), show_alert=True)
             return
         
         media_group_info = _pop_interaction_state("media_group_confirmations", media_group_id)
@@ -2183,9 +2211,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # 清理选择状态
         _pop_interaction_state("media_group_file_selections", media_group_id)
         
-        await query.edit_message_text(
-            f"⬇️ Starting download of {len(selected_files)} selected file(s)..."
-        )
+        await query.edit_message_text(t("download.selection_starting", count=len(selected_files)))
         
         # 开始下载选中的文件
         logger.info(f"Starting selective download: {media_group_id}, {len(selected_files)}/{len(files_info)} files")
@@ -2197,10 +2223,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         for index, file_state in enumerate(selected_files, start=1):
             file_id, file_name, file_size = _file_state_info(file_state)
             await query.edit_message_text(
-                f"⬇️ *Selective download in progress*\n\n"
-                f"> 📄 *Current:* `{index}/{len(selected_files)}` `{_escape_display_text(file_name, _MEDIA_GROUP_FILE_NAME_DISPLAY_LIMIT)}`\n"
-                f"> ✅ *Successful:* `{success_count}`\n"
-                f"> ❌ *Failed:* `{fail_count}`",
+                t(
+                    "download.selective_in_progress",
+                    index=index,
+                    total_count=len(selected_files),
+                    file_name=_escape_display_text(file_name, _MEDIA_GROUP_FILE_NAME_DISPLAY_LIMIT),
+                    success_count=success_count,
+                    fail_count=fail_count,
+                ),
                 parse_mode="Markdown",
             )
             success = await _download_single_file(
@@ -2223,15 +2253,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await asyncio.sleep(0.5)
         
         # 发送总结消息
-        summary_message = (
-            f"📊 *Selective download completed*\n\n"
-            f"> ✅ Successful: `{success_count}`\n"
-            f"> ❌ Failed: `{fail_count}`\n"
-            f"> 📁 Selected: `{len(selected_files)}/{len(files_info)}`"
+        summary_message = t(
+            "download.selective_completed",
+            success_count=success_count,
+            fail_count=fail_count,
+            selected_count=len(selected_files),
+            total_count=len(files_info),
         )
         
         if failed_files:
-            summary_message += "\n\n🔄 *Failed files can be retried individually*"
+            summary_message += t("download.failed_files_retryable")
             _set_interaction_state(
                 "media_group_failed_files",
                 media_group_id,
@@ -2243,8 +2274,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [
-                            InlineKeyboardButton("🔄 Retry All Failed", callback_data=f"retry_media_group_{media_group_id}"),
-                            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_retry_media_group_{media_group_id}"),
+                            InlineKeyboardButton(t("button.retry_all_failed"), callback_data=f"retry_media_group_{media_group_id}"),
+                            InlineKeyboardButton(t("button.cancel"), callback_data=f"cancel_retry_media_group_{media_group_id}"),
                         ]
                     ]
                 ),
@@ -2277,9 +2308,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             files_text = "\n".join(files_list)
             
             response_message = (
-                f"Are you sure you want to download {len(files_info)} files?\n\n"
-                f"{files_text}\n\n"
-                f"> 💾 *Total size:* `{total_size:.2f} MB`"
+                t(
+                    "download.confirm_files",
+                    count=len(files_info),
+                    files_text=files_text,
+                    total_size=total_size,
+                )
             )
             
             await query.edit_message_text(
@@ -2288,31 +2322,31 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [
-                            InlineKeyboardButton("Yes", callback_data=f"media_group_yes_{media_group_id}"),
-                            InlineKeyboardButton("No", callback_data=f"media_group_no_{media_group_id}"),
+                            InlineKeyboardButton(t("button.yes"), callback_data=f"media_group_yes_{media_group_id}"),
+                            InlineKeyboardButton(t("button.no"), callback_data=f"media_group_no_{media_group_id}"),
                         ],
                         [
-                            InlineKeyboardButton("📱 Select Files", callback_data=f"mg_select_{media_group_id}"),
+                            InlineKeyboardButton(t("button.select_files"), callback_data=f"mg_select_{media_group_id}"),
                         ]
                     ]
                 ),
             )
         else:
-            await query.edit_message_text("Selection cancelled.")
+            await query.edit_message_text(t("download.selection_cancelled"))
         
         return
 
     # 处理取消重试（在单个文件确认之前拦截）
     if query.data == "cancel_retry":
         logger.info("Retry cancelled by user")
-        await query.edit_message_text("Retry cancelled.")
+        await query.edit_message_text(t("download.retry_cancelled"))
         return
 
     if query.data.startswith("cancel_retry_media_group_"):
         media_group_id = query.data[len("cancel_retry_media_group_"):]
         _pop_interaction_state("media_group_failed_files", media_group_id)
         logger.info("Media group retry cancelled by user: %s", media_group_id)
-        await query.edit_message_text("Retry cancelled.")
+        await query.edit_message_text(t("download.retry_cancelled"))
         return
     
     # 处理媒体组重试（在单个文件确认之前拦截）
@@ -2323,7 +2357,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             failed_files = failed_info["files"]
             
             logger.info(f"Retrying {len(failed_files)} failed files from media group {media_group_id}")
-            await query.edit_message_text(f"🔄 Retrying {len(failed_files)} failed file(s)...")
+            await query.edit_message_text(t("download.retrying_failed", count=len(failed_files)))
             
             success_count = 0
             fail_count = 0
@@ -2331,10 +2365,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             for index, file_state in enumerate(failed_files, start=1):
                 file_id, file_name, file_size = _file_state_info(file_state)
                 await query.edit_message_text(
-                    f"🔄 *Retry in progress*\n\n"
-                    f"> 📄 *Current:* `{index}/{len(failed_files)}` `{_escape_display_text(file_name, _MEDIA_GROUP_FILE_NAME_DISPLAY_LIMIT)}`\n"
-                    f"> ✅ *Successful:* `{success_count}`\n"
-                    f"> ❌ *Failed:* `{fail_count}`",
+                    t(
+                        "download.retry_in_progress",
+                        index=index,
+                        total_count=len(failed_files),
+                        file_name=_escape_display_text(file_name, _MEDIA_GROUP_FILE_NAME_DISPLAY_LIMIT),
+                        success_count=success_count,
+                        fail_count=fail_count,
+                    ),
                     parse_mode="Markdown",
                 )
                 success = await _download_single_file(
@@ -2355,23 +2393,23 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     fail_count += 1
                 await asyncio.sleep(0.5)
             
-            retry_summary = (
-                f"🔄 *Retry completed*\n\n"
-                f"> ✅ Successful: `{success_count}`\n"
-                f"> ❌ Failed: `{fail_count}`\n"
-                f"> 📁 Total retried: `{len(failed_files)}`"
+            retry_summary = t(
+                "download.retry_completed",
+                success_count=success_count,
+                fail_count=fail_count,
+                total_count=len(failed_files),
             )
             await query.edit_message_text(retry_summary, parse_mode="Markdown")
         else:
             logger.warning(f"Media group {media_group_id} not found for retry")
-            await query.edit_message_text("Retry failed: media group not found or expired.")
+            await query.edit_message_text(t("download.retry_failed_group_missing"))
         return
 
     # 处理单个文件确认
     message = update.effective_message.reply_to_message
     media = message.document or message.video or message.audio
     if not media:
-        await query.edit_message_text("Original file message not found or unsupported.")
+        await query.edit_message_text(t("download.original_missing"))
         return
         
     file_id = media.file_id
@@ -2398,7 +2436,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _download_single_file(file_id, file_name, file_size, message, context, status_message=query.message)
         else:
             logger.warning(f"Retry file ID mismatch: expected {expected_short_id}, got {short_file_id}")
-            await query.edit_message_text("Retry failed: file ID mismatch.")
+            await query.edit_message_text(t("download.retry_failed_file_id"))
     else:
         logger.info("Download cancelled")
-        await query.edit_message_text("Download cancelled.")
+        await query.edit_message_text(t("download.cancelled"))

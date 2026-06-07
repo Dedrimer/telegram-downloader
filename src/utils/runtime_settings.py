@@ -16,6 +16,8 @@ DOWNLOAD_PROGRESS_POLL_INTERVAL_MIN = 1.0
 DOWNLOAD_PROGRESS_POLL_INTERVAL_MAX = 10.0
 ADMIN_PROGRESS_POLL_INTERVAL_MIN = 0.2
 ADMIN_PROGRESS_POLL_INTERVAL_MAX = 10.0
+DEFAULT_LANGUAGE = "en"
+SUPPORTED_LANGUAGES = {"en", "zh-CN"}
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,7 @@ class RuntimeSettings:
     download_status_update_interval: float
     download_progress_poll_interval: float
     admin_progress_poll_interval: float
+    language: str
 
 
 def _parse_bool(value: Any, default: bool) -> bool:
@@ -58,6 +61,19 @@ def _parse_float(
     return parsed
 
 
+def _parse_language(value: Any, default: str) -> str:
+    if not isinstance(value, str):
+        return default
+    normalized = value.strip().replace("_", "-")
+    if not normalized:
+        return default
+    if normalized.lower() in {"zh", "zh-cn", "zh-hans", "chinese", "cn"}:
+        return "zh-CN"
+    if normalized.lower() in {"en", "en-us", "en-gb", "english"}:
+        return "en"
+    return normalized if normalized in SUPPORTED_LANGUAGES else default
+
+
 def build_default_runtime_settings() -> RuntimeSettings:
     return RuntimeSettings(
         single_file_group_enabled=env.SINGLE_FILE_GROUP_ENABLED,
@@ -65,6 +81,7 @@ def build_default_runtime_settings() -> RuntimeSettings:
         download_status_update_interval=env.DOWNLOAD_STATUS_UPDATE_INTERVAL,
         download_progress_poll_interval=env.DOWNLOAD_PROGRESS_POLL_INTERVAL,
         admin_progress_poll_interval=env.ADMIN_PROGRESS_POLL_INTERVAL,
+        language=DEFAULT_LANGUAGE,
     )
 
 
@@ -124,6 +141,10 @@ class RuntimeSettingsStore:
                 self.defaults.admin_progress_poll_interval,
                 ADMIN_PROGRESS_POLL_INTERVAL_MIN,
                 ADMIN_PROGRESS_POLL_INTERVAL_MAX,
+            ),
+            language=_parse_language(
+                payload.get("language"),
+                self.defaults.language,
             ),
         )
         try:

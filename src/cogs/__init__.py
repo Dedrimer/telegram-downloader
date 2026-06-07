@@ -5,6 +5,7 @@ from .downloader import status as status
 from .error_handler import error_handler as error_handler
 from .general import help_command as help_command
 from .general import info as info
+from .general import language as language
 from .general import start as start
 from .general import storage as storage
 
@@ -12,6 +13,7 @@ from .general import storage as storage
 general_commands: list = [
     help_command,
     info,
+    language,
     start,
     storage
 ]
