@@ -10,6 +10,7 @@ os.environ.setdefault("USER_ID", "1")
 os.environ.setdefault("CHAT_ID", "1")
 
 from src import admin_api  # noqa: E402
+from src.cogs import downloader  # noqa: E402
 from src.models import DownloadFile, downloading_files  # noqa: E402
 
 
@@ -36,6 +37,24 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["downloading"], 1)
         self.assertEqual(payload["summary"]["queued"], 1)
         self.assertEqual(payload["items"][0]["progress_percent"], 25.0)
+
+    def test_prequeued_media_group_files_are_visible_to_admin_payload(self):
+        downloader._queue_download_files(
+            [
+                {"file_id": "file-1", "file_name": "one.mp4", "file_size": 100},
+                {"file_id": "file-2", "file_name": "two.mp4", "file_size": 200},
+                {"file_id": "file-3", "file_name": "three.mp4", "file_size": 300},
+            ]
+        )
+
+        payload = admin_api._downloads_payload()
+
+        self.assertEqual(payload["summary"]["total"], 3)
+        self.assertEqual(payload["summary"]["queued"], 3)
+        self.assertEqual(
+            [item["file_name"] for item in payload["items"]],
+            ["one.mp4", "two.mp4", "three.mp4"],
+        )
 
     def test_overview_payload_contains_expected_top_level_sections(self):
         with patch.object(admin_api, "_bot_api_status", return_value={"online": False}):

@@ -502,6 +502,23 @@ def _create_overwrite_download_request(
     return token
 
 
+def _queue_download_file(file_id: str, file_name: str, file_size: int) -> DownloadFile:
+    download_file = downloading_files.get(file_id)
+    if download_file is None:
+        download_file = DownloadFile(file_id, file_name, file_size)
+        downloading_files[file_id] = download_file
+    elif download_file.status == "Downloading":
+        return download_file
+    download_file.mark_queued()
+    return download_file
+
+
+def _queue_download_files(file_states: List[dict[str, Any]]) -> None:
+    for file_state in file_states:
+        file_id, file_name, file_size = _file_state_info(file_state)
+        _queue_download_file(file_id, file_name, file_size)
+
+
 async def _cancel_download(file_id: str) -> bool:
     download_file = downloading_files.get(file_id)
     if download_file:
@@ -1344,12 +1361,19 @@ async def _download_single_file(
     except Exception as e:
         logger.warning(f"Secondary check bypassed: {e}")
 
-    download_file = DownloadFile(
-        file_id,
-        file_name,
-        file_size,
-    )
-    downloading_files[file_id] = download_file
+    download_file = downloading_files.get(file_id)
+    if download_file and download_file.cancel_requested:
+        downloading_files.pop(file_id, None)
+        _download_tasks.pop(file_id, None)
+        _remove_download_cancel_token(file_id)
+        return False
+    if download_file is None:
+        download_file = DownloadFile(
+            file_id,
+            file_name,
+            file_size,
+        )
+        downloading_files[file_id] = download_file
 
     cancel_token = file_id[-16:] if len(file_id) > 16 else file_id
     if cancel_token in _download_cancel_tokens and _download_cancel_tokens[cancel_token] != file_id:
@@ -2039,6 +2063,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         media_group_info = _pop_interaction_state("media_group_confirmations", media_group_id)
         files_info = media_group_info["files"]
+        _queue_download_files(files_info)
         
         await update.effective_message.edit_reply_markup(reply_markup=None)
         
@@ -2207,6 +2232,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         selected_files = [
             files_info[i] for i in range(len(files_info)) if i < len(selections) and selections[i]
         ]
+        _queue_download_files(selected_files)
         
         # 清理选择状态
         _pop_interaction_state("media_group_file_selections", media_group_id)
@@ -2355,6 +2381,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         failed_info = _pop_interaction_state("media_group_failed_files", media_group_id)
         if failed_info:
             failed_files = failed_info["files"]
+            _queue_download_files(failed_files)
             
             logger.info(f"Retrying {len(failed_files)} failed files from media group {media_group_id}")
             await query.edit_message_text(t("download.retrying_failed", count=len(failed_files)))
