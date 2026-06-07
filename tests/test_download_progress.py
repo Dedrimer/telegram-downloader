@@ -44,6 +44,28 @@ class DownloadProgressTests(unittest.TestCase):
         )
 
         self.assertEqual(download_file.downloaded_bytes, 512 * 1024)
+        self.assertEqual(download_file.download_speed, "256.00 KB/s")
+
+    def test_duplicate_progress_sample_does_not_clear_speed(self):
+        started_at = datetime(2026, 1, 1, 12, 0, 0)
+        download_file = DownloadFile(
+            "file-id",
+            "movie.mkv",
+            1024 * 1024,
+            _start_datetime=started_at,
+        )
+
+        download_file.update_progress(
+            512 * 1024,
+            now=started_at + timedelta(seconds=2),
+        )
+        download_file.update_progress(
+            512 * 1024,
+            now=started_at + timedelta(seconds=3),
+        )
+
+        self.assertEqual(download_file.downloaded_bytes, 512 * 1024)
+        self.assertEqual(download_file.download_speed, "256.00 KB/s")
 
     def test_download_status_update_interval_is_clamped(self):
         self.assertEqual(downloader._clamp_download_status_update_interval(0), 5.0)

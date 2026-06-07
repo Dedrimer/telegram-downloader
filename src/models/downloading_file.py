@@ -50,7 +50,8 @@ class DownloadFile:
         downloaded_bytes = max(0, int(downloaded_bytes))
         if self.file_size > 0:
             downloaded_bytes = min(downloaded_bytes, self.file_size)
-        downloaded_bytes = max(downloaded_bytes, self.downloaded_bytes)
+        if downloaded_bytes <= self.downloaded_bytes:
+            return
 
         elapsed = (now - self._last_progress_datetime).total_seconds()
         if elapsed > 0:
